@@ -354,35 +354,41 @@ struct UptimeChipView: View {
     let status: ProjectRunStatus
 
     var body: some View {
-        HStack(spacing: 5) {
-            Circle()
-                .fill(statusTint)
-                .frame(width: 7, height: 7)
-                .overlay {
-                    Circle()
-                        .stroke(statusTint.opacity(0.35), lineWidth: 2)
-                }
-                .accessibilityHidden(true)
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            let elapsed = elapsed(at: context.date)
+            let uptimeText = uptimeText(elapsed: elapsed)
+            let uptimeTint = uptimeTint(elapsed: elapsed)
 
-            Text(uptimeText)
-                .font(.system(size: 10, weight: .semibold))
-                .lineLimit(1)
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(statusTint)
+                    .frame(width: 7, height: 7)
+                    .overlay {
+                        Circle()
+                            .stroke(statusTint.opacity(0.35), lineWidth: 2)
+                    }
+                    .accessibilityHidden(true)
+
+                Text(uptimeText)
+                    .font(.system(size: 10, weight: .semibold))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(uptimeTint)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background {
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(uptimeTint.opacity(0.10))
+            }
+            .help(helpText(elapsed: elapsed, uptimeText: uptimeText))
         }
-        .foregroundStyle(uptimeTint)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 4)
-        .background {
-            RoundedRectangle(cornerRadius: 5)
-                .fill(uptimeTint.opacity(0.10))
-        }
-        .help(helpText)
     }
 
-    private var elapsed: TimeInterval {
-        max(0, Date().timeIntervalSince(startedAt))
+    private func elapsed(at date: Date) -> TimeInterval {
+        max(0, date.timeIntervalSince(startedAt))
     }
 
-    private var uptimeText: String {
+    private func uptimeText(elapsed: TimeInterval) -> String {
         let minutes = Int(elapsed / 60)
         let hours = Int(elapsed / 3_600)
         let days = Int(elapsed / 86_400)
@@ -404,7 +410,7 @@ struct UptimeChipView: View {
         return remainingHours == 0 ? "\(days)d" : "\(days)d \(remainingHours)h"
     }
 
-    private var uptimeTint: Color {
+    private func uptimeTint(elapsed: TimeInterval) -> Color {
         let ratio = min(max(elapsed / kind.uptimeLimit, 0), 1)
 
         switch ratio {
@@ -432,7 +438,7 @@ struct UptimeChipView: View {
         }
     }
 
-    private var helpText: String {
+    private func helpText(elapsed: TimeInterval, uptimeText: String) -> String {
         let limitDays = Int(kind.uptimeLimit / 86_400)
         if elapsed >= kind.uptimeLimit * 0.85 {
             return "Running for \(uptimeText). Cache clean recommended near \(limitDays)d."
