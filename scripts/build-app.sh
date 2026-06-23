@@ -6,6 +6,7 @@ APP_NAME="LocalMonitor"
 APP_DIR="$ROOT_DIR/.build/Local Monitor.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
+APP_ICON="$ROOT_DIR/Sources/LocalMonitor/Resources/AppIcon.icns"
 MIN_MACOS_VERSION="${MIN_MACOS_VERSION:-14.0}"
 
 cd "$ROOT_DIR"
@@ -36,6 +37,9 @@ RESOURCE_BUNDLE="$ROOT_DIR/.build/release/LocalMonitor_LocalMonitor.bundle"
 if [[ -d "$RESOURCE_BUNDLE" ]]; then
   cp -R "$RESOURCE_BUNDLE" "$APP_DIR/"
 fi
+if [[ -f "$APP_ICON" ]]; then
+  cp "$APP_ICON" "$CONTENTS_DIR/Resources/AppIcon.icns"
+fi
 
 cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -50,6 +54,10 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <string>Local Monitor</string>
   <key>CFBundleDisplayName</key>
   <string>Local Monitor</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
+  <key>CFBundleIconName</key>
+  <string>AppIcon</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>

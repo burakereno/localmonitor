@@ -13,6 +13,7 @@ APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
+APP_ICON="$ROOT_DIR/Sources/LocalMonitor/Resources/AppIcon.icns"
 
 REMOTE_LATEST_TAG="$(git -C "$ROOT_DIR" ls-remote --tags --refs origin 'v*' 2>/dev/null | awk '{ sub("refs/tags/", "", $2); print $2 }' | sort -Vr | head -1 || true)"
 LOCAL_LATEST_TAG="$(git -C "$ROOT_DIR" tag -l 'v*' --sort=-v:refname | head -1)"
@@ -41,6 +42,10 @@ RESOURCE_BUNDLE="$(swift build --show-bin-path)/LocalMonitor_LocalMonitor.bundle
 if [[ -d "$RESOURCE_BUNDLE" ]]; then
   cp -R "$RESOURCE_BUNDLE" "$APP_BUNDLE/"
 fi
+mkdir -p "$APP_CONTENTS/Resources"
+if [[ -f "$APP_ICON" ]]; then
+  cp "$APP_ICON" "$APP_CONTENTS/Resources/AppIcon.icns"
+fi
 
 cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -55,6 +60,10 @@ cat >"$INFO_PLIST" <<PLIST
   <string>Local Monitor</string>
   <key>CFBundleDisplayName</key>
   <string>Local Monitor</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
+  <key>CFBundleIconName</key>
+  <string>AppIcon</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
