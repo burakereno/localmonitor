@@ -521,7 +521,6 @@ final class LocalMonitorModel: ObservableObject {
 
     func stopAllProjects() {
         processManager.stopAll()
-        stopObservedProjectProcesses()
         for project in projects {
             runtimeStates[project.id] = .stopped
             lastReadinessCheckDates.removeValue(forKey: project.id)
@@ -944,16 +943,6 @@ final class LocalMonitorModel: ObservableObject {
             .path
 
         return processPath == projectPath || processPath.hasPrefix("\(projectPath)/")
-    }
-
-    private func stopObservedProjectProcesses() {
-        var stoppedPIDs = Set<Int32>()
-
-        for project in projects {
-            guard let owner = matchingProjectProcessOwner(for: project) else { continue }
-            guard stoppedPIDs.insert(owner.pid).inserted else { continue }
-            ProcessTree.terminate(pid: owner.pid)
-        }
     }
 
     private func updateProject(_ project: LocalProject, mutate: (inout LocalProject) -> Void) {

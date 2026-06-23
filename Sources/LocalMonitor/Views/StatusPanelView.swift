@@ -362,7 +362,7 @@ struct StatusPanelView: View {
                 SettingsToggleRowView(
                     icon: "stop.circle",
                     title: "Stop on Quit",
-                    subtitle: "Stop detected project processes when quitting",
+                    subtitle: "Stop app-started project processes when quitting",
                     isOn: $stopProjectsOnQuit
                 )
 
