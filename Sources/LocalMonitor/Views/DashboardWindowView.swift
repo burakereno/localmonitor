@@ -2,6 +2,7 @@ import SwiftUI
 
 struct DashboardWindowView: View {
     @ObservedObject var model: LocalMonitorModel
+    @AppStorage(AppPreference.healthChecksKey) private var healthChecks = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -42,7 +43,7 @@ struct DashboardWindowView: View {
 
                                 Spacer()
 
-                                Text(model.healthStates[project.id]?.displayName ?? state.status.displayName)
+                                Text(projectStatusText(project: project, state: state))
                                     .font(.system(size: 11, weight: .bold, design: .rounded))
                                     .foregroundStyle(state.status == .running ? .green : .secondary)
                             }
@@ -101,5 +102,10 @@ struct DashboardWindowView: View {
 
             content()
         }
+    }
+
+    private func projectStatusText(project: LocalProject, state: ProjectRuntimeState) -> String {
+        guard healthChecks else { return state.status.displayName }
+        return model.healthStates[project.id]?.displayName ?? state.status.displayName
     }
 }

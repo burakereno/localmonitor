@@ -138,6 +138,8 @@ final class LocalMonitorModel: ObservableObject {
             await refreshProjectIdentities()
             if AppPreference.healthChecks {
                 await refreshHealthStates()
+            } else {
+                resetHealthStates()
             }
             scheduleCacheStateRefresh()
             lastError = nil
@@ -676,6 +678,14 @@ final class LocalMonitorModel: ObservableObject {
     func updateAutoRestart(for project: LocalProject, enabled: Bool) {
         updateProject(project) { mutable in
             mutable.autoRestart = enabled
+        }
+    }
+
+    func updateHealthChecks(enabled: Bool) async {
+        if enabled {
+            await refreshHealthStates(force: true)
+        } else {
+            resetHealthStates()
         }
     }
 
@@ -1394,10 +1404,18 @@ final class LocalMonitorModel: ObservableObject {
         lastProjectIdentityRefresh = now
     }
 
-    private func refreshHealthStates() async {
+    private func refreshHealthStates(force: Bool = false) async {
         for project in projects where runtimeState(for: project).status == .running {
-            await checkHealth(for: project)
+            await checkHealth(for: project, force: force)
         }
+    }
+
+    private func resetHealthStates() {
+        for project in projects {
+            healthStates[project.id] = .unknown
+        }
+        lastHealthStates.removeAll()
+        lastHealthCheckDates.removeAll()
     }
 
     private func checkHealth(for project: LocalProject, force: Bool = false) async {

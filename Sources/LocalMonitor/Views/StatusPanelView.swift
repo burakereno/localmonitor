@@ -14,7 +14,7 @@ struct StatusPanelView: View {
     @ObservedObject private var updater = UpdateChecker.shared
 
     @AppStorage(MenuBarDisplayMode.storageKey) private var menuBarDisplayModeRaw = MenuBarDisplayMode.count.rawValue
-    @AppStorage(AppPreference.stopProjectsOnQuitKey) private var stopProjectsOnQuit = true
+    @AppStorage(AppPreference.stopProjectsOnQuitKey) private var stopProjectsOnQuit = false
     @AppStorage(AppPreference.openBrowserAfterStartKey) private var openBrowserAfterStart = true
     @AppStorage(AppPreference.scanExternalPortsKey) private var scanExternalPorts = true
     @AppStorage(AppPreference.showExternalInMenuBarKey) private var showExternalInMenuBar = true
@@ -92,6 +92,14 @@ struct StatusPanelView: View {
         }
         .onChange(of: scanExternalPorts) { _, _ in
             Task { await model.refresh() }
+        }
+        .onChange(of: notifications) { _, enabled in
+            if enabled {
+                NotificationService.shared.prepare()
+            }
+        }
+        .onChange(of: healthChecks) { _, enabled in
+            Task { await model.updateHealthChecks(enabled: enabled) }
         }
         .onChange(of: showDockIcon) { _, _ in
             notifyDockSettingsChanged()
