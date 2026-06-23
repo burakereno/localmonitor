@@ -53,10 +53,10 @@ final class LocalMonitorModel: ObservableObject {
     private var cacheSizeTask: Task<Void, Never>?
     private var projectPanel: NSOpenPanel?
     private var lastHealthStates: [UUID: HealthState] = [:]
-    private var lastHealthCheckDates: [UUID: Date] = [:]
+    private var lastReadinessCheckDates: [UUID: Date] = [:]
     private var lastProjectIdentityRefresh: Date?
     private let cacheSizeRefreshInterval: TimeInterval = 600
-    private let healthCheckRefreshInterval: TimeInterval = 30
+    private let readinessCheckRefreshInterval: TimeInterval = 12
     private let projectIdentityRefreshInterval: TimeInterval = 60
 
     init(
@@ -136,9 +136,8 @@ final class LocalMonitorModel: ObservableObject {
             discoveredPorts = applyPortPreferences(to: annotate(scanned))
             reconcileRunningStates()
             await refreshProjectIdentities()
-            if AppPreference.healthChecks {
-                await refreshHealthStates()
-            } else {
+            await refreshReadinessStates(updateHealthState: AppPreference.healthChecks)
+            if !AppPreference.healthChecks {
                 resetHealthStates()
             }
             scheduleCacheStateRefresh()
@@ -233,7 +232,7 @@ final class LocalMonitorModel: ObservableObject {
         projectIdentities.removeValue(forKey: project.id)
         healthStates.removeValue(forKey: project.id)
         lastHealthStates.removeValue(forKey: project.id)
-        lastHealthCheckDates.removeValue(forKey: project.id)
+        lastReadinessCheckDates.removeValue(forKey: project.id)
         preflightResults.removeValue(forKey: project.id)
         cleanRestartStates.removeValue(forKey: project.id)
         cacheStates.removeValue(forKey: project.id)
@@ -246,16 +245,14 @@ final class LocalMonitorModel: ObservableObject {
 
     func startProject(_ project: LocalProject) async {
         let state = runtimeState(for: project)
-        if state.status == .running || state.status == .starting || state.status == .portMismatch || state.status == .noPort {
+        if state.status == .running || state.status == .starting || state.status == .portMismatch || state.status == .noPort || state.status == .noResponse {
             return
         }
 
         if let owner = matchingProjectPortOwner(for: project) {
             markRunning(project, owner: owner)
-            if AppPreference.healthChecks {
-                await checkHealth(for: project, force: true)
-            }
-            if project.openAfterStart {
+            await checkReadiness(for: project, updateHealthState: AppPreference.healthChecks, force: true)
+            if runtimeState(for: project).status == .running, project.openAfterStart {
                 openInBrowser(project)
             }
             return
@@ -295,9 +292,6 @@ final class LocalMonitorModel: ObservableObject {
         try? await Task.sleep(nanoseconds: 900_000_000)
         await refresh()
         let refreshedState = runtimeState(for: project)
-        if refreshedState.status == .running, AppPreference.healthChecks {
-            await checkHealth(for: project, force: true)
-        }
 
         if refreshedState.status == .running, project.openAfterStart {
             openInBrowser(project)
@@ -313,6 +307,7 @@ final class LocalMonitorModel: ObservableObject {
 
         runtimeStates[project.id] = .stopped
         healthStates[project.id] = .unknown
+        lastReadinessCheckDates.removeValue(forKey: project.id)
         updateMenuBarTitle()
         Task { await verifyStopped(project) }
     }
@@ -324,6 +319,7 @@ final class LocalMonitorModel: ObservableObject {
         guard let owner = matchingProjectProcessOwner(for: project) else {
             runtimeStates[project.id] = .stopped
             healthStates[project.id] = .unknown
+            lastReadinessCheckDates.removeValue(forKey: project.id)
             updateMenuBarTitle()
             return
         }
@@ -338,6 +334,7 @@ final class LocalMonitorModel: ObservableObject {
         } else {
             runtimeStates[project.id] = .stopped
             healthStates[project.id] = .unknown
+            lastReadinessCheckDates.removeValue(forKey: project.id)
         }
 
         updateMenuBarTitle()
@@ -475,7 +472,7 @@ final class LocalMonitorModel: ObservableObject {
                 progress: 0.9,
                 keepsOnlineGroup: keepOnlineGroup
             )
-            await checkHealth(for: project, force: true)
+            await checkReadiness(for: project, updateHealthState: true, force: true)
         }
 
         let state = runtimeState(for: project)
@@ -526,6 +523,7 @@ final class LocalMonitorModel: ObservableObject {
         processManager.stopAll()
         for project in projects {
             runtimeStates[project.id] = .stopped
+            lastReadinessCheckDates.removeValue(forKey: project.id)
         }
         updateMenuBarTitle()
     }
@@ -683,7 +681,7 @@ final class LocalMonitorModel: ObservableObject {
 
     func updateHealthChecks(enabled: Bool) async {
         if enabled {
-            await refreshHealthStates(force: true)
+            await refreshReadinessStates(updateHealthState: true, force: true)
         } else {
             resetHealthStates()
         }
@@ -778,6 +776,7 @@ final class LocalMonitorModel: ObservableObject {
             state.status != .starting,
             state.status != .portMismatch,
             state.status != .noPort,
+            state.status != .noResponse,
             let owner = conflictOwner(for: project)
         {
             state.status = .portBusy
@@ -903,7 +902,7 @@ final class LocalMonitorModel: ObservableObject {
     private func projectIsRunningOrStarting(_ project: LocalProject) -> Bool {
         let state = runtimeState(for: project)
         switch state.status {
-        case .running, .starting, .portMismatch, .noPort:
+        case .running, .starting, .portMismatch, .noPort, .noResponse:
             return true
         case .stopped, .portBusy, .crashed:
             break
@@ -922,7 +921,7 @@ final class LocalMonitorModel: ObservableObject {
         switch runtimeState(for: project).status {
         case .running, .portMismatch:
             return true
-        case .starting, .noPort, .stopped, .portBusy, .crashed:
+        case .starting, .noPort, .noResponse, .stopped, .portBusy, .crashed:
             return false
         }
     }
@@ -1242,7 +1241,7 @@ final class LocalMonitorModel: ObservableObject {
                 continue
             }
 
-            if state.status == .stopped || state.status == .starting || state.status == .running || state.status == .portMismatch || state.status == .noPort {
+            if state.status == .stopped || state.status == .starting || state.status == .running || state.status == .portMismatch || state.status == .noPort || state.status == .noResponse {
                 if let owner = matchingProjectPortOwner(for: project) {
                     markRunning(project, owner: owner)
                 } else if let observed = matchingProjectProcessOwner(for: project) {
@@ -1272,11 +1271,14 @@ final class LocalMonitorModel: ObservableObject {
 
     private func markRunning(_ project: LocalProject, owner: DiscoveredPort) {
         var state = runtimeStates[project.id] ?? .stopped
+        let previousStatus = state.status
         syncStartedAt(&state, owner: owner)
-        state.status = .running
+        state.status = previousStatus == .noResponse ? .noResponse : .running
         state.pid = owner.pid
         state.observedPort = owner.port
-        state.lastMessage = "Listening on localhost:\(project.port)"
+        if previousStatus != .noResponse {
+            state.lastMessage = "Listening on localhost:\(project.port)"
+        }
         runtimeStates[project.id] = state
         updateMenuBarTitle()
     }
@@ -1404,9 +1406,18 @@ final class LocalMonitorModel: ObservableObject {
         lastProjectIdentityRefresh = now
     }
 
-    private func refreshHealthStates(force: Bool = false) async {
-        for project in projects where runtimeState(for: project).status == .running {
-            await checkHealth(for: project, force: force)
+    private func refreshReadinessStates(updateHealthState: Bool, force: Bool = false) async {
+        for project in projects where shouldCheckReadiness(for: project) {
+            await checkReadiness(for: project, updateHealthState: updateHealthState, force: force)
+        }
+    }
+
+    private func shouldCheckReadiness(for project: LocalProject) -> Bool {
+        switch runtimeState(for: project).status {
+        case .running, .noResponse:
+            return true
+        case .stopped, .starting, .portBusy, .portMismatch, .noPort, .crashed:
+            return false
         }
     }
 
@@ -1415,25 +1426,60 @@ final class LocalMonitorModel: ObservableObject {
             healthStates[project.id] = .unknown
         }
         lastHealthStates.removeAll()
-        lastHealthCheckDates.removeAll()
     }
 
-    private func checkHealth(for project: LocalProject, force: Bool = false) async {
+    private func checkReadiness(
+        for project: LocalProject,
+        updateHealthState: Bool,
+        force: Bool = false
+    ) async {
         if
             !force,
-            let lastCheck = lastHealthCheckDates[project.id],
-            Date().timeIntervalSince(lastCheck) < healthCheckRefreshInterval
+            let lastCheck = lastReadinessCheckDates[project.id],
+            Date().timeIntervalSince(lastCheck) < readinessCheckRefreshInterval
         {
             return
         }
 
-        lastHealthCheckDates[project.id] = Date()
-        healthStates[project.id] = .checking
+        lastReadinessCheckDates[project.id] = Date()
+        if updateHealthState {
+            healthStates[project.id] = .checking
+        }
         let next = await healthChecker.check(project)
+        applyReadinessState(next, for: project)
+
+        guard updateHealthState else { return }
+
         let previous = lastHealthStates[project.id]
         healthStates[project.id] = next
         lastHealthStates[project.id] = next
+        notifyHealthChange(project: project, previous: previous, next: next)
+    }
 
+    private func applyReadinessState(_ health: HealthState, for project: LocalProject) {
+        var state = runtimeStates[project.id] ?? .stopped
+        guard state.status == .running || state.status == .noResponse else { return }
+
+        switch health {
+        case .healthy, .warning:
+            state.status = .running
+            state.lastMessage = "Listening on localhost:\(state.observedPort ?? project.port)"
+        case .unreachable(let message):
+            state.status = .noResponse
+            state.lastMessage = message
+        case .unknown, .checking:
+            return
+        }
+
+        runtimeStates[project.id] = state
+        updateMenuBarTitle()
+    }
+
+    private func notifyHealthChange(
+        project: LocalProject,
+        previous: HealthState?,
+        next: HealthState
+    ) {
         switch next {
         case .healthy:
             if previous == nil || previous == .checking || previous == .unknown {

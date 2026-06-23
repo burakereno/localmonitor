@@ -115,6 +115,18 @@ struct ProjectCardView: View {
                     }
             }
 
+            if state.status == .noResponse {
+                Text(state.lastMessage ?? "Port is open, but localhost is not responding.")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+                    .padding(9)
+                    .background {
+                        RoundedRectangle(cornerRadius: 7)
+                            .fill(Color.red.opacity(0.08))
+                    }
+            }
+
         }
         .padding(12)
         .localCardBackground()
@@ -143,7 +155,7 @@ struct ProjectCardView: View {
 
     private var startDisabled: Bool {
         switch state.status {
-        case .running, .starting, .portMismatch, .noPort:
+        case .running, .starting, .portMismatch, .noPort, .noResponse:
             return true
         case .stopped, .portBusy, .crashed:
             return cleanRestartState?.isActive == true
@@ -154,14 +166,14 @@ struct ProjectCardView: View {
         switch state.status {
         case .stopped, .portBusy:
             return true
-        case .starting, .running, .portMismatch, .noPort, .crashed:
+        case .starting, .running, .portMismatch, .noPort, .noResponse, .crashed:
             return false
         }
     }
 
     private var showsUptime: Bool {
         switch state.status {
-        case .running, .starting, .portMismatch, .noPort:
+        case .running, .starting, .portMismatch, .noPort, .noResponse:
             return true
         case .stopped, .portBusy, .crashed:
             return false
@@ -231,7 +243,7 @@ struct ProjectStartButton: View {
 
     private var showsStatusPill: Bool {
         switch status {
-        case .starting, .running, .portMismatch, .noPort:
+        case .starting, .running, .portMismatch, .noPort, .noResponse:
             return true
         case .stopped, .portBusy, .crashed:
             return false
@@ -244,6 +256,8 @@ struct ProjectStartButton: View {
             return .green
         case .starting, .portMismatch, .noPort:
             return .orange
+        case .noResponse:
+            return .red
         case .crashed:
             return .red
         case .stopped, .portBusy:
@@ -257,6 +271,8 @@ struct ProjectStartButton: View {
             return "arrow.left.arrow.right"
         case .noPort:
             return "network.slash"
+        case .noResponse:
+            return "wifi.exclamationmark"
         case .starting:
             return "hourglass"
         case .running:
@@ -303,7 +319,7 @@ struct ProjectInlineStatusChip: View {
             return .orange
         case .running:
             return .green
-        case .crashed:
+        case .noResponse, .crashed:
             return .red
         case .stopped, .portBusy:
             return .secondary
@@ -316,6 +332,8 @@ struct ProjectInlineStatusChip: View {
             return "arrow.left.arrow.right"
         case .noPort:
             return "network.slash"
+        case .noResponse:
+            return "wifi.exclamationmark"
         case .starting:
             return "hourglass"
         case .running:
@@ -407,7 +425,7 @@ struct UptimeChipView: View {
             return .green
         case .starting, .portBusy, .portMismatch, .noPort:
             return .orange
-        case .crashed:
+        case .noResponse, .crashed:
             return .red
         case .stopped:
             return .secondary.opacity(0.75)

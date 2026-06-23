@@ -88,7 +88,7 @@ struct StatusBadge: View {
             return .orange
         case .portMismatch, .noPort:
             return .orange
-        case .crashed:
+        case .noResponse, .crashed:
             return .red
         }
     }
@@ -116,7 +116,7 @@ struct StatusDot: View {
             return .green
         case .starting, .portBusy, .portMismatch, .noPort:
             return .orange
-        case .crashed:
+        case .noResponse, .crashed:
             return .red
         case .stopped:
             return .secondary.opacity(0.75)

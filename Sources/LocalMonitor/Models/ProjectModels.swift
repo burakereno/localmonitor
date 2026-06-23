@@ -325,6 +325,7 @@ enum ProjectRunStatus: Equatable {
     case portBusy
     case portMismatch
     case noPort
+    case noResponse
     case crashed
 
     var displayName: String {
@@ -341,6 +342,8 @@ enum ProjectRunStatus: Equatable {
             return "Port Mismatch"
         case .noPort:
             return "No Port"
+        case .noResponse:
+            return "No Response"
         case .crashed:
             return "Crashed"
         }
