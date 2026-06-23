@@ -1247,6 +1247,14 @@ final class LocalMonitorModel: ObservableObject {
                         state.status = .starting
                     }
                     runtimeStates[project.id] = state
+                } else if state.status != .stopped {
+                    state.status = .stopped
+                    state.pid = nil
+                    state.observedPort = nil
+                    state.startedAt = nil
+                    state.lastMessage = "Stopped."
+                    runtimeStates[project.id] = state
+                    healthStates[project.id] = .unknown
                 }
             }
         }

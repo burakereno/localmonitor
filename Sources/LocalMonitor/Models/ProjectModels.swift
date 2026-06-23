@@ -706,7 +706,7 @@ enum AppPreference {
     }
 
     static var stopProjectsOnQuit: Bool {
-        UserDefaults.standard.object(forKey: stopProjectsOnQuitKey) as? Bool ?? true
+        UserDefaults.standard.object(forKey: stopProjectsOnQuitKey) as? Bool ?? false
     }
 
     static var autoStartSavedProjects: Bool {
