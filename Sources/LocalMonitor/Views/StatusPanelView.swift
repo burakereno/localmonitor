@@ -713,20 +713,19 @@ struct StatusPanelView: View {
             Button {
                 Task { await updater.checkForUpdates(force: true) }
             } label: {
-                if updater.isChecking {
-                    ProgressView()
-                        .controlSize(.small)
-                        .frame(width: 14, height: 14)
-                } else {
-                    Image(systemName: "arrow.down.circle")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 14, height: 14)
-                }
+                Image(systemName: updater.isChecking ? "arrow.triangle.2.circlepath.circle.fill" : "arrow.clockwise.circle")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(updater.isChecking ? .tertiary : .secondary)
+                    .frame(width: 14, height: 14)
+                    .contentTransition(.symbolEffect(.replace))
             }
             .buttonStyle(.plain)
             .disabled(updater.isChecking)
             .help(updater.isChecking ? "Checking for Updates" : "Check for Updates")
+            .onHover { hovering in
+                if hovering && !updater.isChecking { NSCursor.pointingHand.push() }
+                else { NSCursor.pop() }
+            }
 
             Text(footerUpdateText)
                 .font(.system(size: 10, weight: .semibold))
