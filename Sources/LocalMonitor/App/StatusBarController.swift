@@ -87,8 +87,7 @@ final class StatusBarController: NSObject {
         NSColor.clear.setFill()
         NSRect(x: 0, y: 0, width: width, height: height).fill()
 
-        let symbolName = title.runningCount > 0 ? "server.rack" : "terminal"
-        drawSymbol(symbolName, x: LocalMenuBarDisplay.horizontalPadding, canvasHeight: height)
+        drawSymbol("server.rack", x: LocalMenuBarDisplay.horizontalPadding, canvasHeight: height)
 
         if let text {
             let attributes: [NSAttributedString.Key: Any] = [

@@ -7,7 +7,7 @@ struct DashboardWindowView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Label("Local Monitor", systemImage: "terminal")
+                Label("Local Monitor", systemImage: "server.rack")
                     .font(.system(size: 16, weight: .bold))
 
                 Spacer()

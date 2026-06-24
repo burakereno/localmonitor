@@ -600,7 +600,7 @@ struct StatusPanelView: View {
     private var header: some View {
         HStack {
             HStack(spacing: 7) {
-                Image(systemName: "terminal")
+                Image(systemName: "server.rack")
                     .font(.system(size: 13, weight: .bold))
                     .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(.primary)
@@ -1027,7 +1027,7 @@ private struct AboutCardView: View {
             }
 
             HStack(spacing: 9) {
-                Image(systemName: "terminal")
+                Image(systemName: "server.rack")
                     .font(.system(size: 18, weight: .bold))
                     .foregroundStyle(.secondary)
                     .frame(width: 28, height: 28)
