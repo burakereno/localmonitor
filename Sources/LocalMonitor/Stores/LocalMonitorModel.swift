@@ -16,6 +16,14 @@ enum CleanRestartError: LocalizedError {
     }
 }
 
+private struct RuntimeSessionSnapshot: Codable {
+    let startedAt: Date
+    let processStartedAt: Date?
+    let lastSeenRunningAt: Date?
+    let pid: Int32?
+    let observedPort: Int?
+}
+
 @MainActor
 final class LocalMonitorModel: ObservableObject {
     @Published private(set) var projects: [LocalProject]
@@ -58,6 +66,7 @@ final class LocalMonitorModel: ObservableObject {
     private let cacheSizeRefreshInterval: TimeInterval = 600
     private let readinessCheckRefreshInterval: TimeInterval = 12
     private let projectIdentityRefreshInterval: TimeInterval = 60
+    private let sessionContinuityGraceInterval: TimeInterval = 120
 
     init(
         store: ProjectStore = ProjectStore(),
@@ -79,6 +88,7 @@ final class LocalMonitorModel: ObservableObject {
         self.processManager = processManager ?? ProjectProcessManager()
         let loadedLibrary = store.load()
         let library = Self.migrateLegacyCommandTemplates(in: loadedLibrary)
+        let savedRuntimeSessions = Self.loadRuntimeSessions()
         self.projects = library.projects
         self.groups = library.groups
         self.pinnedPortNames = Self.loadPinnedPorts()
@@ -89,7 +99,11 @@ final class LocalMonitorModel: ObservableObject {
         }
 
         for project in projects {
-            runtimeStates[project.id] = .stopped
+            if let snapshot = savedRuntimeSessions[project.id] {
+                runtimeStates[project.id] = Self.runtimeState(from: snapshot)
+            } else {
+                runtimeStates[project.id] = .stopped
+            }
             healthStates[project.id] = .unknown
         }
 
@@ -146,6 +160,7 @@ final class LocalMonitorModel: ObservableObject {
             lastError = error.localizedDescription
         }
 
+        persistRuntimeSessions()
         lastUpdated = Date()
         updateMenuBarTitle()
     }
@@ -308,6 +323,7 @@ final class LocalMonitorModel: ObservableObject {
         runtimeStates[project.id] = .stopped
         healthStates[project.id] = .unknown
         lastReadinessCheckDates.removeValue(forKey: project.id)
+        persistRuntimeSessions()
         updateMenuBarTitle()
         Task { await verifyStopped(project) }
     }
@@ -320,6 +336,7 @@ final class LocalMonitorModel: ObservableObject {
             runtimeStates[project.id] = .stopped
             healthStates[project.id] = .unknown
             lastReadinessCheckDates.removeValue(forKey: project.id)
+            persistRuntimeSessions()
             updateMenuBarTitle()
             return
         }
@@ -337,6 +354,7 @@ final class LocalMonitorModel: ObservableObject {
             lastReadinessCheckDates.removeValue(forKey: project.id)
         }
 
+        persistRuntimeSessions()
         updateMenuBarTitle()
     }
 
@@ -1155,6 +1173,58 @@ final class LocalMonitorModel: ObservableObject {
         store.save(ProjectLibrary(projects: projects, groups: groups))
     }
 
+    private func persistRuntimeSessions() {
+        let snapshots = runtimeStates.reduce(into: [String: RuntimeSessionSnapshot]()) { result, item in
+            guard let startedAt = item.value.startedAt else { return }
+            result[item.key.uuidString] = RuntimeSessionSnapshot(
+                startedAt: startedAt,
+                processStartedAt: item.value.processStartedAt,
+                lastSeenRunningAt: item.value.lastSeenRunningAt,
+                pid: item.value.pid,
+                observedPort: item.value.observedPort
+            )
+        }
+
+        guard !snapshots.isEmpty else {
+            UserDefaults.standard.removeObject(forKey: Self.runtimeSessionsKey)
+            return
+        }
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+
+        guard let data = try? encoder.encode(snapshots) else { return }
+        UserDefaults.standard.set(data, forKey: Self.runtimeSessionsKey)
+    }
+
+    private static func loadRuntimeSessions() -> [UUID: RuntimeSessionSnapshot] {
+        guard let data = UserDefaults.standard.data(forKey: runtimeSessionsKey) else {
+            return [:]
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        guard let snapshots = try? decoder.decode([String: RuntimeSessionSnapshot].self, from: data) else {
+            return [:]
+        }
+
+        return snapshots.reduce(into: [UUID: RuntimeSessionSnapshot]()) { result, item in
+            guard let id = UUID(uuidString: item.key) else { return }
+            result[id] = item.value
+        }
+    }
+
+    private static func runtimeState(from snapshot: RuntimeSessionSnapshot) -> ProjectRuntimeState {
+        var state = ProjectRuntimeState.stopped
+        state.pid = snapshot.pid
+        state.startedAt = snapshot.startedAt
+        state.processStartedAt = snapshot.processStartedAt
+        state.lastSeenRunningAt = snapshot.lastSeenRunningAt
+        state.observedPort = snapshot.observedPort
+        return state
+    }
+
     private static func migrateLegacyCommandTemplates(in library: ProjectLibrary) -> ProjectLibrary {
         var migrated = library
 
@@ -1235,6 +1305,8 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     private func reconcileRunningStates() {
+        let now = Date()
+
         for project in projects {
             guard var state = runtimeStates[project.id] else {
                 runtimeStates[project.id] = .stopped
@@ -1256,11 +1328,20 @@ final class LocalMonitorModel: ObservableObject {
                         state.status = .starting
                     }
                     runtimeStates[project.id] = state
-                } else if state.status != .stopped {
+                } else if state.isWithinSessionContinuityGrace(
+                    now: now,
+                    continuityGrace: sessionContinuityGraceInterval
+                ) {
+                    state.status = .noPort
+                    state.pid = nil
+                    state.observedPort = nil
+                    state.lastMessage = "Waiting for localhost:\(project.port) to reopen."
+                    runtimeStates[project.id] = state
+                } else if state.status != .stopped || state.startedAt != nil || state.lastSeenRunningAt != nil {
                     state.status = .stopped
                     state.pid = nil
                     state.observedPort = nil
-                    state.startedAt = nil
+                    state.clearSessionTiming()
                     state.lastMessage = "Stopped."
                     runtimeStates[project.id] = state
                     healthStates[project.id] = .unknown
@@ -1280,6 +1361,7 @@ final class LocalMonitorModel: ObservableObject {
             state.lastMessage = "Listening on localhost:\(project.port)"
         }
         runtimeStates[project.id] = state
+        persistRuntimeSessions()
         updateMenuBarTitle()
     }
 
@@ -1291,23 +1373,15 @@ final class LocalMonitorModel: ObservableObject {
         state.observedPort = owner.port
         state.lastMessage = "Expected \(project.port), running on \(owner.port)."
         runtimeStates[project.id] = state
+        persistRuntimeSessions()
         updateMenuBarTitle()
     }
 
     private func syncStartedAt(_ state: inout ProjectRuntimeState, owner: DiscoveredPort) {
-        if let ownerStartedAt = owner.startedAt {
-            if state.pid != owner.pid
-                || state.startedAt == nil
-                || abs(ownerStartedAt.timeIntervalSince(state.startedAt ?? ownerStartedAt)) > 5
-            {
-                state.startedAt = ownerStartedAt
-            }
-            return
-        }
-
-        if state.pid != owner.pid || state.startedAt == nil {
-            state.startedAt = Date()
-        }
+        state.syncSession(
+            with: owner,
+            continuityGrace: sessionContinuityGraceInterval
+        )
     }
 
     private func setState(
@@ -1329,10 +1403,11 @@ final class LocalMonitorModel: ObservableObject {
             state.observedPort = nil
         }
         if status == .stopped || status == .portBusy || status == .crashed {
-            state.startedAt = nil
+            state.clearSessionTiming()
         }
         state.lastMessage = message
         runtimeStates[projectId] = state
+        persistRuntimeSessions()
         updateMenuBarTitle()
     }
 
@@ -1353,10 +1428,11 @@ final class LocalMonitorModel: ObservableObject {
             state.status = code == 0 ? .stopped : .crashed
             state.pid = nil
             state.observedPort = nil
-            state.startedAt = nil
+            state.clearSessionTiming()
             state.lastMessage = code == 0 ? "Stopped." : "Exited with code \(code)."
             runtimeStates[projectId] = state
             healthStates[projectId] = .unknown
+            persistRuntimeSessions()
             updateMenuBarTitle()
 
             guard code != 0, let project = projects.first(where: { $0.id == projectId }) else { return }
@@ -1553,6 +1629,7 @@ final class LocalMonitorModel: ObservableObject {
 
     private static let pinnedPortsKey = "pinnedPortNames"
     private static let ignoredPortsKey = "ignoredPorts"
+    private static let runtimeSessionsKey = "runtimeSessionsV1"
 }
 
 private extension LocalMonitorModel {

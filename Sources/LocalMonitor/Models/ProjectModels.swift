@@ -354,11 +354,98 @@ struct ProjectRuntimeState: Equatable {
     var status: ProjectRunStatus = .stopped
     var pid: Int32?
     var startedAt: Date?
+    var processStartedAt: Date?
+    var lastSeenRunningAt: Date?
     var lastMessage: String?
     var observedPort: Int?
     var logs: [String] = []
 
     static let stopped = ProjectRuntimeState()
+
+    mutating func syncSession(
+        with owner: DiscoveredPort,
+        now: Date = Date(),
+        continuityGrace: TimeInterval = 120,
+        processStartTolerance: TimeInterval = 5
+    ) {
+        let previousStartedAt = startedAt
+        let previousLastSeenRunningAt = lastSeenRunningAt
+        let ownerProcessStartedAt = owner.startedAt
+
+        processStartedAt = ownerProcessStartedAt
+        lastSeenRunningAt = now
+
+        guard let previousStartedAt else {
+            startedAt = ownerProcessStartedAt ?? now
+            return
+        }
+
+        guard let ownerProcessStartedAt else {
+            if Self.canContinueSession(
+                previousStartedAt: previousStartedAt,
+                previousLastSeenRunningAt: previousLastSeenRunningAt,
+                candidateStartedAt: nil,
+                now: now,
+                continuityGrace: continuityGrace
+            ) {
+                return
+            }
+
+            startedAt = now
+            return
+        }
+
+        if ownerProcessStartedAt < previousStartedAt.addingTimeInterval(-processStartTolerance) {
+            startedAt = ownerProcessStartedAt
+            return
+        }
+
+        if abs(ownerProcessStartedAt.timeIntervalSince(previousStartedAt)) <= processStartTolerance {
+            startedAt = min(previousStartedAt, ownerProcessStartedAt)
+            return
+        }
+
+        if Self.canContinueSession(
+            previousStartedAt: previousStartedAt,
+            previousLastSeenRunningAt: previousLastSeenRunningAt,
+            candidateStartedAt: ownerProcessStartedAt,
+            now: now,
+            continuityGrace: continuityGrace
+        ) {
+            return
+        }
+
+        startedAt = ownerProcessStartedAt
+    }
+
+    func isWithinSessionContinuityGrace(now: Date = Date(), continuityGrace: TimeInterval = 120) -> Bool {
+        guard let lastSeenRunningAt else { return false }
+        return now <= lastSeenRunningAt.addingTimeInterval(continuityGrace)
+    }
+
+    mutating func clearSessionTiming() {
+        startedAt = nil
+        processStartedAt = nil
+        lastSeenRunningAt = nil
+    }
+
+    private static func canContinueSession(
+        previousStartedAt: Date,
+        previousLastSeenRunningAt: Date?,
+        candidateStartedAt: Date?,
+        now: Date,
+        continuityGrace: TimeInterval
+    ) -> Bool {
+        if let previousLastSeenRunningAt {
+            if let candidateStartedAt {
+                return candidateStartedAt <= previousLastSeenRunningAt.addingTimeInterval(continuityGrace)
+            }
+
+            return now <= previousLastSeenRunningAt.addingTimeInterval(continuityGrace)
+        }
+
+        return now <= previousStartedAt.addingTimeInterval(continuityGrace)
+    }
 }
 
 enum CleanRestartPhase: Equatable {
