@@ -7,6 +7,8 @@ APP_DIR="$ROOT_DIR/.build/Local Monitor.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 APP_ICON="$ROOT_DIR/Sources/LocalMonitor/Resources/AppIcon.icns"
+APP_RESOURCES="$ROOT_DIR/Sources/LocalMonitor/Resources"
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 MIN_MACOS_VERSION="${MIN_MACOS_VERSION:-14.0}"
 
 cd "$ROOT_DIR"
@@ -33,9 +35,8 @@ mkdir -p "$MACOS_DIR" "$CONTENTS_DIR/Resources"
 cp "$ROOT_DIR/.build/release/$APP_NAME" "$MACOS_DIR/$APP_NAME"
 chmod +x "$MACOS_DIR/$APP_NAME"
 
-RESOURCE_BUNDLE="$ROOT_DIR/.build/release/LocalMonitor_LocalMonitor.bundle"
-if [[ -d "$RESOURCE_BUNDLE" ]]; then
-  cp -R "$RESOURCE_BUNDLE" "$APP_DIR/"
+if [[ -d "$APP_RESOURCES" ]]; then
+  cp -R "$APP_RESOURCES"/. "$CONTENTS_DIR/Resources/"
 fi
 if [[ -f "$APP_ICON" ]]; then
   cp "$APP_ICON" "$CONTENTS_DIR/Resources/AppIcon.icns"
@@ -75,5 +76,11 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+CODESIGN_ARGS=(--force --deep --options runtime --sign "$CODESIGN_IDENTITY")
+if [[ "$CODESIGN_IDENTITY" != "-" ]]; then
+  CODESIGN_ARGS+=(--timestamp)
+fi
+/usr/bin/codesign "${CODESIGN_ARGS[@]}" "$APP_DIR" >/dev/null
 
 echo "Built $APP_DIR"

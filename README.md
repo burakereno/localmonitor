@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <sub>macOS 14.0+ · local development servers only · See <a href="#installation">Installation</a> for first-launch instructions</sub>
+  <sub>macOS 14.0+ · local development servers only · Developer ID signed and notarized</sub>
 </p>
 
 <p align="center">
@@ -46,15 +46,7 @@
 2. Download **`LocalMonitor.dmg`**
 3. Open the DMG and drag **Local Monitor.app** to your **Applications** folder
 
-### Important: First Launch (Unsigned App)
-
-Since Local Monitor is not notarized by Apple, macOS may block it on first launch. To fix this, run the following command in Terminal **once** after installing:
-
-```bash
-xattr -cr "/Applications/Local Monitor.app"
-```
-
-Then double-click Local Monitor to launch it. The app appears in your menu bar and is shown as **Local Monitor**.
+Release downloads are Developer ID signed and notarized. Double-click Local Monitor to launch it. The app appears in your menu bar and is shown as **Local Monitor**.
 
 ## Build from Source
 
@@ -82,3 +74,5 @@ open ".build/Local Monitor.app"
 - **Swift Package Manager** — build system
 - **lsof / ps** — local port and process discovery
 - **GitHub Releases** — in-app update checks and DMG distribution
+
+Release signing setup is documented in [docs/release-signing.md](docs/release-signing.md).

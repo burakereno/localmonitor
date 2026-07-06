@@ -827,10 +827,10 @@ private final class ProjectIconCache {
             return cached
         }
 
-        guard
-            let url = Bundle.module.url(forResource: name, withExtension: "svg"),
-            let image = NSImage(contentsOf: url)
-        else {
+        let resourceURL = Bundle.main.url(forResource: name, withExtension: "svg")
+            ?? Bundle.module.url(forResource: name, withExtension: "svg")
+
+        guard let resourceURL, let image = NSImage(contentsOf: resourceURL) else {
             return nil
         }
 
