@@ -57,6 +57,7 @@ final class LocalMonitorModel: ObservableObject {
     private let healthChecker: HealthChecker
     private let notificationService: NotificationService
     private let processManager: ProjectProcessManager
+    private let defaults: UserDefaults
     private var refreshTask: Task<Void, Never>?
     private var cacheSizeTask: Task<Void, Never>?
     private var projectPanel: NSOpenPanel?
@@ -76,7 +77,8 @@ final class LocalMonitorModel: ObservableObject {
         preflightChecker: PreflightChecker = PreflightChecker(),
         healthChecker: HealthChecker = HealthChecker(),
         notificationService: NotificationService? = nil,
-        processManager: ProjectProcessManager? = nil
+        processManager: ProjectProcessManager? = nil,
+        userDefaults: UserDefaults = .standard
     ) {
         self.store = store
         self.portScanner = portScanner
@@ -86,13 +88,14 @@ final class LocalMonitorModel: ObservableObject {
         self.healthChecker = healthChecker
         self.notificationService = notificationService ?? .shared
         self.processManager = processManager ?? ProjectProcessManager()
+        self.defaults = userDefaults
         let loadedLibrary = store.load()
         let library = Self.migrateLegacyCommandTemplates(in: loadedLibrary)
-        let savedRuntimeSessions = Self.loadRuntimeSessions()
+        let savedRuntimeSessions = Self.loadRuntimeSessions(from: userDefaults)
         self.projects = library.projects
         self.groups = library.groups
-        self.pinnedPortNames = Self.loadPinnedPorts()
-        self.ignoredPorts = Self.loadIgnoredPorts()
+        self.pinnedPortNames = Self.loadPinnedPorts(from: userDefaults)
+        self.ignoredPorts = Self.loadIgnoredPorts(from: userDefaults)
 
         if library != loadedLibrary {
             store.save(library)
@@ -543,6 +546,7 @@ final class LocalMonitorModel: ObservableObject {
             runtimeStates[project.id] = .stopped
             lastReadinessCheckDates.removeValue(forKey: project.id)
         }
+        persistRuntimeSessions()
         updateMenuBarTitle()
     }
 
@@ -820,7 +824,7 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func updateMenuBarTitle() {
-        let displayModeRaw = UserDefaults.standard.string(forKey: MenuBarDisplayMode.storageKey)
+        let displayModeRaw = defaults.string(forKey: MenuBarDisplayMode.storageKey)
         let displayMode = displayModeRaw.flatMap(MenuBarDisplayMode.init(rawValue:)) ?? .count
         let running = projects.filter { runtimeState(for: $0).status == .running }.count
         let externalCount = AppPreference.showExternalInMenuBar ? externalPorts.count : 0
@@ -1186,7 +1190,7 @@ final class LocalMonitorModel: ObservableObject {
         }
 
         guard !snapshots.isEmpty else {
-            UserDefaults.standard.removeObject(forKey: Self.runtimeSessionsKey)
+            defaults.removeObject(forKey: Self.runtimeSessionsKey)
             return
         }
 
@@ -1194,11 +1198,11 @@ final class LocalMonitorModel: ObservableObject {
         encoder.dateEncodingStrategy = .iso8601
 
         guard let data = try? encoder.encode(snapshots) else { return }
-        UserDefaults.standard.set(data, forKey: Self.runtimeSessionsKey)
+        defaults.set(data, forKey: Self.runtimeSessionsKey)
     }
 
-    private static func loadRuntimeSessions() -> [UUID: RuntimeSessionSnapshot] {
-        guard let data = UserDefaults.standard.data(forKey: runtimeSessionsKey) else {
+    private static func loadRuntimeSessions(from defaults: UserDefaults) -> [UUID: RuntimeSessionSnapshot] {
+        guard let data = defaults.data(forKey: runtimeSessionsKey) else {
             return [:]
         }
 
@@ -1594,12 +1598,12 @@ final class LocalMonitorModel: ObservableObject {
         let pins = pinnedPortNames.reduce(into: [String: String]()) { result, item in
             result[String(item.key)] = item.value
         }
-        UserDefaults.standard.set(pins, forKey: Self.pinnedPortsKey)
-        UserDefaults.standard.set(Array(ignoredPorts).sorted(), forKey: Self.ignoredPortsKey)
+        defaults.set(pins, forKey: Self.pinnedPortsKey)
+        defaults.set(Array(ignoredPorts).sorted(), forKey: Self.ignoredPortsKey)
     }
 
-    private static func loadPinnedPorts() -> [Int: String] {
-        guard let raw = UserDefaults.standard.dictionary(forKey: pinnedPortsKey) as? [String: String] else {
+    private static func loadPinnedPorts(from defaults: UserDefaults) -> [Int: String] {
+        guard let raw = defaults.dictionary(forKey: pinnedPortsKey) as? [String: String] else {
             return [:]
         }
 
@@ -1610,8 +1614,8 @@ final class LocalMonitorModel: ObservableObject {
         }
     }
 
-    private static func loadIgnoredPorts() -> Set<Int> {
-        let raw = UserDefaults.standard.array(forKey: ignoredPortsKey) as? [Int] ?? []
+    private static func loadIgnoredPorts(from defaults: UserDefaults) -> Set<Int> {
+        let raw = defaults.array(forKey: ignoredPortsKey) as? [Int] ?? []
         return Set(raw)
     }
 

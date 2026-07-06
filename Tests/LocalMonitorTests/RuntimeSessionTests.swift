@@ -3,6 +3,8 @@ import XCTest
 @testable import LocalMonitor
 
 final class RuntimeSessionTests: XCTestCase {
+    private let runtimeSessionsKey = "runtimeSessionsV1"
+
     func testKeepsSessionStartWhenListenerPIDChangesWithinGrace() {
         let sessionStartedAt = Date(timeIntervalSince1970: 1_780_000_000)
         let previousLastSeen = sessionStartedAt.addingTimeInterval(7_200)
@@ -106,6 +108,57 @@ final class RuntimeSessionTests: XCTestCase {
         XCTAssertNil(state.processStartedAt)
     }
 
+    @MainActor
+    func testStopAllProjectsClearsPersistedRuntimeSessions() throws {
+        let suiteName = "LocalMonitorTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LocalMonitorTests-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempURL)
+        }
+
+        let projectID = UUID()
+        let project = LocalProject(
+            id: projectID,
+            name: "meetcase",
+            path: tempURL.appendingPathComponent("meetcase/web", isDirectory: true).path,
+            kind: .nextjs,
+            packageManager: .pnpm,
+            port: 3000,
+            commandTemplate: "pnpm dev -p {port}"
+        )
+        let store = ProjectStore(storageDirectoryURL: tempURL)
+        store.save(ProjectLibrary(projects: [project], groups: []))
+
+        let startedAt = Date(timeIntervalSince1970: 1_780_000_000)
+        let snapshot = RuntimeSessionTestSnapshot(
+            startedAt: startedAt,
+            processStartedAt: startedAt,
+            lastSeenRunningAt: startedAt.addingTimeInterval(30),
+            pid: 12345,
+            observedPort: 3000
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        defaults.set(
+            try encoder.encode([projectID.uuidString: snapshot]),
+            forKey: runtimeSessionsKey
+        )
+
+        let model = LocalMonitorModel(store: store, userDefaults: defaults)
+        XCTAssertNotNil(defaults.data(forKey: runtimeSessionsKey))
+
+        model.stopAllProjects()
+
+        XCTAssertNil(defaults.data(forKey: runtimeSessionsKey))
+        XCTAssertEqual(model.runtimeState(for: project).status, .stopped)
+    }
+
     private func port(pid: Int32, startedAt: Date?) -> DiscoveredPort {
         DiscoveredPort(
             port: 3000,
@@ -124,4 +177,12 @@ final class RuntimeSessionTests: XCTestCase {
             projectName: "meetcase"
         )
     }
+}
+
+private struct RuntimeSessionTestSnapshot: Codable {
+    let startedAt: Date
+    let processStartedAt: Date?
+    let lastSeenRunningAt: Date?
+    let pid: Int32?
+    let observedPort: Int?
 }

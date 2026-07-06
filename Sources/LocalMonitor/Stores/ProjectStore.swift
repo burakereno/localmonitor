@@ -13,11 +13,13 @@ enum ProjectStoreError: LocalizedError {
 
 final class ProjectStore {
     private let fileManager: FileManager
+    private let storageDirectoryURL: URL?
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
-    init(fileManager: FileManager = .default) {
+    init(fileManager: FileManager = .default, storageDirectoryURL: URL? = nil) {
         self.fileManager = fileManager
+        self.storageDirectoryURL = storageDirectoryURL
         self.encoder = JSONEncoder()
         self.decoder = JSONDecoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -58,6 +60,10 @@ final class ProjectStore {
     }
 
     private func storeURL() throws -> URL {
+        if let storageDirectoryURL {
+            return storageDirectoryURL.appendingPathComponent("projects.json")
+        }
+
         guard let appSupport = fileManager.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
