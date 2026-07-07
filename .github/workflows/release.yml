@@ -154,11 +154,7 @@ jobs:
 
       - name: Create DMG
         run: |
-          mkdir -p dmg_source
-          cp -R ".build/Local Monitor.app" dmg_source/
-          ln -s /Applications dmg_source/Applications
-          hdiutil create -volname "Local Monitor" -srcfolder dmg_source -ov -format UDZO LocalMonitor.dmg
-          rm -rf dmg_source
+          ./scripts/create-dmg.sh ".build/Local Monitor.app" LocalMonitor.dmg
           codesign --force --sign "${{ steps.signing.outputs.identity }}" --timestamp LocalMonitor.dmg
 
       - name: Notarize DMG

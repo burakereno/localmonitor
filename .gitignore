@@ -1,6 +1,7 @@
 .DS_Store
 .build/
 dist/
+*.dmg
 DerivedData/
 *.xcuserstate
 *.swp
