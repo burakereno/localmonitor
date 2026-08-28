@@ -148,6 +148,9 @@ final class LocalMonitorModel: ObservableObject {
         isRefreshing = true
         defer { isRefreshing = false }
 
+        refreshProjectNames()
+        ProjectIconCache.shared.refreshFavicons(for: projects)
+
         do {
             let scanned = AppPreference.scanExternalPorts ? try await portScanner.scan() : []
             discoveredPorts = applyPortPreferences(to: annotate(scanned))
@@ -317,6 +320,10 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func stopProject(_ project: LocalProject) {
+        stopProject(project, schedulesVerification: true)
+    }
+
+    private func stopProject(_ project: LocalProject, schedulesVerification: Bool) {
         if processManager.isRunning(projectId: project.id) {
             processManager.stop(projectId: project.id)
         } else if let owner = matchingProjectProcessOwner(for: project) {
@@ -328,7 +335,9 @@ final class LocalMonitorModel: ObservableObject {
         lastReadinessCheckDates.removeValue(forKey: project.id)
         persistRuntimeSessions()
         updateMenuBarTitle()
-        Task { await verifyStopped(project) }
+        if schedulesVerification {
+            Task { await verifyStopped(project) }
+        }
     }
 
     private func verifyStopped(_ project: LocalProject) async {
@@ -373,8 +382,8 @@ final class LocalMonitorModel: ObservableObject {
             keepsOnlineGroup: keepOnlineGroup,
             operation: .restart
         )
-        stopProject(project)
-        try? await Task.sleep(nanoseconds: 450_000_000)
+        stopProject(project, schedulesVerification: false)
+        await refreshAfterProcessStop()
         setCleanRestartState(
             for: project,
             phase: .starting,
@@ -426,9 +435,8 @@ final class LocalMonitorModel: ObservableObject {
                 keepsOnlineGroup: keepOnlineGroup
             )
             appendLog(projectId: project.id, text: "Cache clean: stopping project.")
-            stopProject(project)
-            try? await Task.sleep(nanoseconds: 850_000_000)
-            await refresh()
+            stopProject(project, schedulesVerification: false)
+            await refreshAfterProcessStop()
         }
 
         setCleanRestartState(
@@ -974,6 +982,32 @@ final class LocalMonitorModel: ObservableObject {
         persist()
         updateMenuBarTitle()
         Task { await refresh() }
+    }
+
+    private func refreshProjectNames() {
+        var didChange = false
+
+        for index in projects.indices {
+            guard let detectedName = ProjectDetector.packageName(in: projects[index].folderURL) else {
+                continue
+            }
+            guard projects[index].name != detectedName else { continue }
+
+            projects[index].name = detectedName
+            projects[index].updatedAt = Date()
+            didChange = true
+        }
+
+        if didChange {
+            persist()
+        }
+    }
+
+    private func refreshAfterProcessStop() async {
+        while isRefreshing {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        await refresh()
     }
 
     private func setCleanRestartState(

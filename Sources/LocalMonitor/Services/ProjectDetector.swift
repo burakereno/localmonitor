@@ -50,6 +50,10 @@ enum ProjectDetector {
         )
     }
 
+    static func packageName(in folderURL: URL) -> String? {
+        readPackageJSON(in: folderURL)?.name?.nilIfBlank
+    }
+
     private static func detectKind(folderURL: URL, dependencies: Set<String>) -> ProjectKind {
         if dependencies.contains("next") || fileExists("next.config.js", in: folderURL)
             || fileExists("next.config.mjs", in: folderURL)

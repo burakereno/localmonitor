@@ -88,7 +88,7 @@ final class ProjectProcessManager {
         process.terminationHandler = { [weak self] terminated in
             let code = terminated.terminationStatus
             Task { @MainActor in
-                self?.handleTermination(projectId: project.id, code: code)
+                self?.handleTermination(projectId: project.id, process: terminated, code: code)
             }
         }
 
@@ -115,8 +115,15 @@ final class ProjectProcessManager {
         }
     }
 
-    private func handleTermination(projectId: UUID, code: Int32) {
-        guard let running = processes.removeValue(forKey: projectId) else { return }
+    private func handleTermination(projectId: UUID, process: Process, code: Int32) {
+        guard
+            let running = processes[projectId],
+            running.process === process
+        else {
+            return
+        }
+
+        processes.removeValue(forKey: projectId)
         running.pipe.fileHandleForReading.readabilityHandler = nil
         onEvent?(.exited(projectId: projectId, code: code))
     }

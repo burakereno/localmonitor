@@ -722,13 +722,14 @@ struct CleanRestartProgressView: View {
 struct ProjectAvatarView: View {
     let project: LocalProject
     let tint: Color
+    @ObservedObject private var iconCache = ProjectIconCache.shared
 
     var body: some View {
         ZStack {
             Circle()
                 .fill(backgroundFill)
 
-            if let favicon = ProjectIconCache.shared.favicon(for: project) {
+            if let favicon = iconCache.favicon(for: project) {
                 Image(nsImage: favicon)
                     .resizable()
                     .scaledToFit()
@@ -745,7 +746,7 @@ struct ProjectAvatarView: View {
     }
 
     private var backgroundFill: Color {
-        if ProjectIconCache.shared.hasFavicon(for: project) {
+        if iconCache.hasFavicon(for: project) {
             return Color.primary.opacity(0.08)
         }
 
@@ -798,24 +799,59 @@ struct FrameworkLogoView: View {
 }
 
 @MainActor
-private final class ProjectIconCache {
+final class ProjectIconCache: ObservableObject {
     static let shared = ProjectIconCache()
 
-    private var faviconCache: [String: NSImage?] = [:]
+    @Published private(set) var faviconRevision = 0
+
+    private var faviconCache: [String: FaviconCacheEntry] = [:]
     private var frameworkLogoCache: [String: NSImage] = [:]
 
     func favicon(for project: LocalProject) -> NSImage? {
         let key = project.path
         if let cached = faviconCache[key] {
-            return cached
+            return cached.image
         }
 
-        let image = faviconURLs(for: project)
+        let snapshot = faviconSnapshot(for: project)
+        let image = snapshot.files
             .lazy
-            .compactMap(loadFavicon)
+            .compactMap { self.loadFavicon(from: $0.url) }
             .first
-        faviconCache[key] = image
+        faviconCache[key] = FaviconCacheEntry(snapshot: snapshot, image: image)
         return image
+    }
+
+    func refreshFavicons(for projects: [LocalProject]) {
+        let projectPaths = Set(projects.map(\.path))
+        faviconCache = faviconCache.filter { projectPaths.contains($0.key) }
+
+        var didChange = false
+
+        for project in projects {
+            let key = project.path
+            guard let cached = faviconCache[key] else { continue }
+
+            let snapshot = faviconSnapshot(for: project)
+            guard snapshot != cached.snapshot else { continue }
+
+            let refreshedImage = snapshot.files
+                .lazy
+                .compactMap { self.loadFavicon(from: $0.url) }
+                .first
+
+            if let refreshedImage {
+                faviconCache[key] = FaviconCacheEntry(snapshot: snapshot, image: refreshedImage)
+                didChange = true
+            } else if snapshot.files.isEmpty {
+                faviconCache[key] = FaviconCacheEntry(snapshot: snapshot, image: nil)
+                didChange = cached.image != nil
+            }
+        }
+
+        if didChange {
+            faviconRevision &+= 1
+        }
     }
 
     func hasFavicon(for project: LocalProject) -> Bool {
@@ -849,6 +885,20 @@ private final class ProjectIconCache {
         }
 
         return image
+    }
+
+    private func faviconSnapshot(for project: LocalProject) -> FaviconSnapshot {
+        let files = faviconURLs(for: project).map { url in
+            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+            return FaviconFileSignature(
+                url: url,
+                modificationDate: attributes?[.modificationDate] as? Date,
+                fileSize: (attributes?[.size] as? NSNumber)?.uint64Value,
+                fileNumber: (attributes?[.systemFileNumber] as? NSNumber)?.uint64Value
+            )
+        }
+
+        return FaviconSnapshot(files: files)
     }
 
     private func faviconURLs(for project: LocalProject) -> [URL] {
@@ -936,6 +986,22 @@ private final class ProjectIconCache {
             return 4
         }
     }
+}
+
+private struct FaviconCacheEntry {
+    let snapshot: FaviconSnapshot
+    let image: NSImage?
+}
+
+private struct FaviconSnapshot: Equatable {
+    let files: [FaviconFileSignature]
+}
+
+private struct FaviconFileSignature: Equatable {
+    let url: URL
+    let modificationDate: Date?
+    let fileSize: UInt64?
+    let fileNumber: UInt64?
 }
 
 private extension ProjectKind {
