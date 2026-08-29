@@ -55,7 +55,15 @@ final class RestartProjectTests: XCTestCase {
             runtimeDefaults.removePersistentDomain(forName: suiteName)
         }
 
-        let model = LocalMonitorModel(store: store, userDefaults: runtimeDefaults)
+        let processManager = ProjectProcessManager(
+            userDefaults: runtimeDefaults,
+            storageDirectoryURL: temporaryDirectory.appendingPathComponent("logs")
+        )
+        let model = LocalMonitorModel(
+            store: store,
+            processManager: processManager,
+            userDefaults: runtimeDefaults
+        )
         defer {
             model.stopAllProjects()
         }

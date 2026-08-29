@@ -63,6 +63,9 @@ struct ProjectCardView: View {
             HStack(spacing: 6) {
                 ProjectKindChip(kind: project.kind)
                 MetadataChip(icon: "number", text: "\(project.port)")
+                if state.ownership == .external {
+                    MetadataChip(icon: "arrow.up.right.square", text: "External")
+                }
                 if let branch = identity?.branch {
                     MetadataChip(icon: "arrow.triangle.branch", text: branch)
                 }
@@ -130,6 +133,11 @@ struct ProjectCardView: View {
         }
         .padding(12)
         .localCardBackground()
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(statusBorderColor, lineWidth: statusBorderWidth)
+                .allowsHitTesting(false)
+        }
     }
 
     private var kindTint: Color {
@@ -183,6 +191,27 @@ struct ProjectCardView: View {
     private var cacheOperationState: CleanRestartState? {
         guard cleanRestartState?.operation == .cacheClean else { return nil }
         return cleanRestartState
+    }
+
+    private var statusBorderColor: Color {
+        if cleanRestartState?.isActive == true {
+            return .orange.opacity(0.48)
+        }
+
+        switch state.status {
+        case .running:
+            return .green.opacity(0.42)
+        case .starting, .portBusy, .portMismatch, .noPort:
+            return .orange.opacity(0.46)
+        case .noResponse, .crashed:
+            return .red.opacity(0.48)
+        case .stopped:
+            return .clear
+        }
+    }
+
+    private var statusBorderWidth: CGFloat {
+        cleanRestartState?.isActive == true || state.status != .stopped ? 1 : 0
     }
 }
 
@@ -722,6 +751,7 @@ struct CleanRestartProgressView: View {
 struct ProjectAvatarView: View {
     let project: LocalProject
     let tint: Color
+    var size: CGFloat = 24
     @ObservedObject private var iconCache = ProjectIconCache.shared
 
     var body: some View {
@@ -732,17 +762,18 @@ struct ProjectAvatarView: View {
             if let favicon = iconCache.favicon(for: project) {
                 Image(nsImage: favicon)
                     .resizable()
-                    .scaledToFit()
-                    .frame(width: 20, height: 20)
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .scaledToFill()
+                    .frame(width: size - 4, height: size - 4)
+                    .compositingGroup()
+                    .clipShape(Circle())
             } else {
                 Image(systemName: project.kind.symbolName)
-                    .font(.system(size: 14, weight: .bold))
+                    .font(.system(size: size * 0.58, weight: .bold))
                     .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(tint)
             }
         }
-        .frame(width: 24, height: 24)
+        .frame(width: size, height: size)
     }
 
     private var backgroundFill: Color {
@@ -1113,6 +1144,15 @@ struct ExternalPortGroupView: View {
 
                         Text(verbatim: String(group.primaryPort.port))
                             .font(.system(size: 12, weight: .bold, design: .monospaced))
+
+                        Text("External")
+                            .font(.system(size: 8.5, weight: .bold, design: .rounded))
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background {
+                                Capsule().fill(Color.orange.opacity(0.10))
+                            }
 
                         if !group.secondaryPorts.isEmpty {
                             Text("+\(group.secondaryPorts.count)")

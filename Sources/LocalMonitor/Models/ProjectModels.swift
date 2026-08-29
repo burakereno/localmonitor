@@ -209,6 +209,9 @@ struct LocalProject: Identifiable, Codable, Equatable {
     var autoRestart: Bool
     var openAfterStart: Bool
     var workspaceGroupIDs: [UUID]
+    var isQuickLaunchPinned: Bool
+    var quickLaunchOrder: Int?
+    var lastUsedAt: Date?
     var createdAt: Date
     var updatedAt: Date
 
@@ -226,6 +229,9 @@ struct LocalProject: Identifiable, Codable, Equatable {
         autoRestart: Bool = false,
         openAfterStart: Bool = true,
         workspaceGroupIDs: [UUID] = [],
+        isQuickLaunchPinned: Bool = false,
+        quickLaunchOrder: Int? = nil,
+        lastUsedAt: Date? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -242,6 +248,9 @@ struct LocalProject: Identifiable, Codable, Equatable {
         self.autoRestart = autoRestart
         self.openAfterStart = openAfterStart
         self.workspaceGroupIDs = workspaceGroupIDs
+        self.isQuickLaunchPinned = isQuickLaunchPinned
+        self.quickLaunchOrder = quickLaunchOrder
+        self.lastUsedAt = lastUsedAt
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -260,6 +269,9 @@ struct LocalProject: Identifiable, Codable, Equatable {
         case autoRestart
         case openAfterStart
         case workspaceGroupIDs
+        case isQuickLaunchPinned
+        case quickLaunchOrder
+        case lastUsedAt
         case createdAt
         case updatedAt
     }
@@ -279,6 +291,9 @@ struct LocalProject: Identifiable, Codable, Equatable {
         autoRestart = try container.decodeIfPresent(Bool.self, forKey: .autoRestart) ?? false
         openAfterStart = try container.decodeIfPresent(Bool.self, forKey: .openAfterStart) ?? true
         workspaceGroupIDs = try container.decodeIfPresent([UUID].self, forKey: .workspaceGroupIDs) ?? []
+        isQuickLaunchPinned = try container.decodeIfPresent(Bool.self, forKey: .isQuickLaunchPinned) ?? false
+        quickLaunchOrder = try container.decodeIfPresent(Int.self, forKey: .quickLaunchOrder)
+        lastUsedAt = try container.decodeIfPresent(Date.self, forKey: .lastUsedAt)
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
     }
@@ -350,8 +365,15 @@ enum ProjectRunStatus: Equatable {
     }
 }
 
+enum ProjectProcessOwnership: Equatable {
+    case none
+    case managed
+    case external
+}
+
 struct ProjectRuntimeState: Equatable {
     var status: ProjectRunStatus = .stopped
+    var ownership: ProjectProcessOwnership = .none
     var pid: Int32?
     var startedAt: Date?
     var processStartedAt: Date?
@@ -765,6 +787,7 @@ struct MenuBarTitle: Equatable {
 
 enum AppPreference {
     static let stopProjectsOnQuitKey = "stopProjectsOnQuit"
+    static let stopProjectsOnQuitDefault = true
     static let autoStartSavedProjectsKey = "autoStartSavedProjects"
     static let openBrowserAfterStartKey = "openBrowserAfterStart"
     static let scanExternalPortsKey = "scanExternalPorts"
@@ -796,7 +819,7 @@ enum AppPreference {
     }
 
     static var stopProjectsOnQuit: Bool {
-        UserDefaults.standard.object(forKey: stopProjectsOnQuitKey) as? Bool ?? false
+        UserDefaults.standard.object(forKey: stopProjectsOnQuitKey) as? Bool ?? stopProjectsOnQuitDefault
     }
 
     static var autoStartSavedProjects: Bool {

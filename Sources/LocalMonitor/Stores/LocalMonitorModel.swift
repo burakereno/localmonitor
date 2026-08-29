@@ -87,7 +87,7 @@ final class LocalMonitorModel: ObservableObject {
         self.preflightChecker = preflightChecker
         self.healthChecker = healthChecker
         self.notificationService = notificationService ?? .shared
-        self.processManager = processManager ?? ProjectProcessManager()
+        self.processManager = processManager ?? ProjectProcessManager(userDefaults: userDefaults)
         self.defaults = userDefaults
         let loadedLibrary = store.load()
         let library = Self.migrateLegacyCommandTemplates(in: loadedLibrary)
@@ -110,6 +110,7 @@ final class LocalMonitorModel: ObservableObject {
             healthStates[project.id] = .unknown
         }
 
+        self.processManager.reconcile(projects: projects)
         self.processManager.onEvent = { [weak self] event in
             self?.handle(processEvent: event)
         }
@@ -150,6 +151,7 @@ final class LocalMonitorModel: ObservableObject {
 
         refreshProjectNames()
         ProjectIconCache.shared.refreshFavicons(for: projects)
+        processManager.reconcile(projects: projects)
 
         do {
             let scanned = AppPreference.scanExternalPorts ? try await portScanner.scan() : []
@@ -161,6 +163,7 @@ final class LocalMonitorModel: ObservableObject {
                 resetHealthStates()
             }
             scheduleCacheStateRefresh()
+            refreshManagedLogs()
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -245,6 +248,7 @@ final class LocalMonitorModel: ObservableObject {
 
     func removeProject(_ project: LocalProject) {
         stopProject(project)
+        processManager.removeLog(for: project.id)
         projects.removeAll { $0.id == project.id }
         for index in groups.indices {
             groups[index].projectIDs.removeAll { $0 == project.id }
@@ -264,7 +268,11 @@ final class LocalMonitorModel: ObservableObject {
         updateMenuBarTitle()
     }
 
-    func startProject(_ project: LocalProject) async {
+    func startProject(_ project: LocalProject, recordsUsage: Bool = true) async {
+        if recordsUsage {
+            recordProjectUse(project)
+        }
+
         let state = runtimeState(for: project)
         if state.status == .running || state.status == .starting || state.status == .portMismatch || state.status == .noPort || state.status == .noResponse {
             return
@@ -274,7 +282,7 @@ final class LocalMonitorModel: ObservableObject {
             markRunning(project, owner: owner)
             await checkReadiness(for: project, updateHealthState: AppPreference.healthChecks, force: true)
             if runtimeState(for: project).status == .running, project.openAfterStart {
-                openInBrowser(project)
+                openInBrowser(project, recordsUsage: false)
             }
             return
         }
@@ -301,7 +309,12 @@ final class LocalMonitorModel: ObservableObject {
             return
         }
 
-        setState(for: project.id, status: .starting, message: project.resolvedCommand)
+        setState(
+            for: project.id,
+            status: .starting,
+            ownership: .managed,
+            message: project.resolvedCommand
+        )
 
         do {
             try processManager.start(project: project)
@@ -315,7 +328,7 @@ final class LocalMonitorModel: ObservableObject {
         let refreshedState = runtimeState(for: project)
 
         if refreshedState.status == .running, project.openAfterStart {
-            openInBrowser(project)
+            openInBrowser(project, recordsUsage: false)
         }
     }
 
@@ -372,6 +385,7 @@ final class LocalMonitorModel: ObservableObject {
 
     func restartProject(_ project: LocalProject) async {
         guard cleanRestartStates[project.id]?.isActive != true else { return }
+        recordProjectUse(project)
 
         let keepOnlineGroup = isProjectOnlineForGrouping(project)
         setCleanRestartState(
@@ -392,7 +406,7 @@ final class LocalMonitorModel: ObservableObject {
             keepsOnlineGroup: keepOnlineGroup,
             operation: .restart
         )
-        await startProject(project)
+        await startProject(project, recordsUsage: false)
 
         let state = runtimeState(for: project)
         guard state.status == .running || state.status == .portMismatch || state.status == .noPort else {
@@ -423,6 +437,7 @@ final class LocalMonitorModel: ObservableObject {
     func cleanRestartProject(_ project: LocalProject) async {
         guard project.kind.supportsCleanRestart else { return }
         guard cleanRestartStates[project.id]?.isActive != true else { return }
+        recordProjectUse(project)
 
         let shouldRestartAfterClean = projectIsRunningOrStarting(project)
         let keepOnlineGroup = isProjectOnlineForGrouping(project)
@@ -491,7 +506,7 @@ final class LocalMonitorModel: ObservableObject {
             progress: 0.72,
             keepsOnlineGroup: keepOnlineGroup
         )
-        await startProject(project)
+        await startProject(project, recordsUsage: false)
 
         if AppPreference.healthChecks {
             setCleanRestartState(
@@ -532,13 +547,13 @@ final class LocalMonitorModel: ObservableObject {
 
     func startAllProjects() async {
         for project in projects {
-            await startProject(project)
+            await startProject(project, recordsUsage: false)
         }
     }
 
     func startAutoStartProjects() async {
         for project in projects where project.autoStart {
-            await startProject(project)
+            await startProject(project, recordsUsage: false)
         }
     }
 
@@ -549,8 +564,8 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func stopAllProjects() {
-        processManager.stopAll()
-        for project in projects {
+        let stoppedProjectIDs = processManager.stopAll()
+        for project in projects where stoppedProjectIDs.contains(project.id) {
             runtimeStates[project.id] = .stopped
             lastReadinessCheckDates.removeValue(forKey: project.id)
         }
@@ -611,7 +626,10 @@ final class LocalMonitorModel: ObservableObject {
         Task { await refresh() }
     }
 
-    func openInBrowser(_ project: LocalProject) {
+    func openInBrowser(_ project: LocalProject, recordsUsage: Bool = true) {
+        if recordsUsage {
+            recordProjectUse(project)
+        }
         guard let url = project.localURL else { return }
         NSWorkspace.shared.open(url)
     }
@@ -622,16 +640,18 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func openLoopback(_ project: LocalProject) {
+        recordProjectUse(project)
         guard let url = URL(string: "http://127.0.0.1:\(project.port)") else { return }
         NSWorkspace.shared.open(url)
     }
 
     func openObservedPort(_ project: LocalProject) {
+        recordProjectUse(project)
         guard
             let observedPort = runtimeState(for: project).observedPort,
             let url = URL(string: "http://localhost:\(observedPort)")
         else {
-            openInBrowser(project)
+            openInBrowser(project, recordsUsage: false)
             return
         }
 
@@ -740,6 +760,9 @@ final class LocalMonitorModel: ObservableObject {
         clone.commandTemplate = preset?.commandTemplate ?? project.commandTemplate
         clone.healthPath = preset?.healthPath ?? project.healthPath
         clone.autoStart = false
+        clone.isQuickLaunchPinned = false
+        clone.quickLaunchOrder = nil
+        clone.lastUsedAt = nil
         clone.createdAt = Date()
         clone.updatedAt = Date()
 
@@ -788,7 +811,7 @@ final class LocalMonitorModel: ObservableObject {
 
     func startGroup(_ group: WorkspaceGroup) async {
         for project in projects where group.projectIDs.contains(project.id) {
-            await startProject(project)
+            await startProject(project, recordsUsage: false)
         }
     }
 
@@ -796,6 +819,80 @@ final class LocalMonitorModel: ObservableObject {
         for project in projects where group.projectIDs.contains(project.id) {
             stopProject(project)
         }
+    }
+
+    var quickLaunchProjects: [LocalProject] {
+        projects
+            .enumerated()
+            .sorted { lhs, rhs in
+                let lhsProject = lhs.element
+                let rhsProject = rhs.element
+
+                if lhsProject.isQuickLaunchPinned != rhsProject.isQuickLaunchPinned {
+                    return lhsProject.isQuickLaunchPinned
+                }
+
+                if lhsProject.isQuickLaunchPinned {
+                    let lhsOrder = lhsProject.quickLaunchOrder ?? .max
+                    let rhsOrder = rhsProject.quickLaunchOrder ?? .max
+                    if lhsOrder != rhsOrder {
+                        return lhsOrder < rhsOrder
+                    }
+                } else if lhsProject.lastUsedAt != rhsProject.lastUsedAt {
+                    switch (lhsProject.lastUsedAt, rhsProject.lastUsedAt) {
+                    case let (lhsDate?, rhsDate?):
+                        return lhsDate > rhsDate
+                    case (_?, nil):
+                        return true
+                    case (nil, _?):
+                        return false
+                    case (nil, nil):
+                        break
+                    }
+                }
+
+                return lhs.offset < rhs.offset
+            }
+            .map(\.element)
+    }
+
+    func setQuickLaunchPinned(_ project: LocalProject, pinned: Bool) {
+        guard projects.contains(where: { $0.id == project.id }) else { return }
+
+        var pinnedIDs = orderedPinnedProjectIDs
+        pinnedIDs.removeAll { $0 == project.id }
+        if pinned {
+            pinnedIDs.append(project.id)
+        }
+
+        applyQuickLaunchPinOrder(pinnedIDs)
+        persist()
+    }
+
+    @discardableResult
+    func moveQuickLaunchProject(_ sourceProjectID: UUID, before targetProjectID: UUID) -> Bool {
+        guard sourceProjectID != targetProjectID else { return false }
+        guard projects.contains(where: { $0.id == sourceProjectID }) else { return false }
+        guard projects.contains(where: { $0.id == targetProjectID }) else { return false }
+
+        var pinnedIDs = orderedPinnedProjectIDs
+        pinnedIDs.removeAll { $0 == sourceProjectID }
+
+        if let targetIndex = pinnedIDs.firstIndex(of: targetProjectID) {
+            pinnedIDs.insert(sourceProjectID, at: targetIndex)
+        } else {
+            pinnedIDs.append(sourceProjectID)
+        }
+
+        applyQuickLaunchPinOrder(pinnedIDs)
+        persist()
+        return true
+    }
+
+    func recordProjectUse(_ project: LocalProject, at date: Date = Date()) {
+        guard let index = projects.firstIndex(where: { $0.id == project.id }) else { return }
+        projects[index].lastUsedAt = date
+        persist()
     }
 
     func runtimeState(for project: LocalProject) -> ProjectRuntimeState {
@@ -822,6 +919,7 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func clearLogs(for project: LocalProject) {
+        processManager.clearLog(for: project.id)
         var state = runtimeStates[project.id] ?? .stopped
         state.logs.removeAll()
         runtimeStates[project.id] = state
@@ -1325,7 +1423,7 @@ final class LocalMonitorModel: ObservableObject {
                 copy.projectId = project.id
                 copy.projectName = project.name
             } else if let project = projects.first(where: { sameProjectProcessOwner(port, for: $0) }) {
-                copy.isManaged = true
+                copy.isManaged = false
                 copy.projectId = project.id
                 copy.projectName = project.name
             }
@@ -1357,6 +1455,7 @@ final class LocalMonitorModel: ObservableObject {
                 } else if let observed = matchingProjectProcessOwner(for: project) {
                     markPortMismatch(project, owner: observed)
                 } else if processManager.isRunning(projectId: project.id) {
+                    state.ownership = .managed
                     let elapsed = state.startedAt.map { Date().timeIntervalSince($0) } ?? 0
                     if elapsed > 10 {
                         state.status = .noPort
@@ -1377,6 +1476,7 @@ final class LocalMonitorModel: ObservableObject {
                     runtimeStates[project.id] = state
                 } else if state.status != .stopped || state.startedAt != nil || state.lastSeenRunningAt != nil {
                     state.status = .stopped
+                    state.ownership = .none
                     state.pid = nil
                     state.observedPort = nil
                     state.clearSessionTiming()
@@ -1393,6 +1493,7 @@ final class LocalMonitorModel: ObservableObject {
         let previousStatus = state.status
         syncStartedAt(&state, owner: owner)
         state.status = previousStatus == .noResponse ? .noResponse : .running
+        state.ownership = owner.isManaged ? .managed : .external
         state.pid = owner.pid
         state.observedPort = owner.port
         if previousStatus != .noResponse {
@@ -1407,6 +1508,7 @@ final class LocalMonitorModel: ObservableObject {
         var state = runtimeStates[project.id] ?? .stopped
         syncStartedAt(&state, owner: owner)
         state.status = .portMismatch
+        state.ownership = owner.isManaged ? .managed : .external
         state.pid = owner.pid
         state.observedPort = owner.port
         state.lastMessage = "Expected \(project.port), running on \(owner.port)."
@@ -1425,12 +1527,16 @@ final class LocalMonitorModel: ObservableObject {
     private func setState(
         for projectId: UUID,
         status: ProjectRunStatus,
+        ownership: ProjectProcessOwnership? = nil,
         pid: Int32? = nil,
         startedAt: Date? = nil,
         message: String? = nil
     ) {
         var state = runtimeStates[projectId] ?? .stopped
         state.status = status
+        if let ownership {
+            state.ownership = ownership
+        }
         if let pid {
             state.pid = pid
         }
@@ -1441,6 +1547,7 @@ final class LocalMonitorModel: ObservableObject {
             state.observedPort = nil
         }
         if status == .stopped || status == .portBusy || status == .crashed {
+            state.ownership = .none
             state.clearSessionTiming()
         }
         state.lastMessage = message
@@ -1455,15 +1562,15 @@ final class LocalMonitorModel: ObservableObject {
             setState(
                 for: projectId,
                 status: .starting,
+                ownership: .managed,
                 pid: pid,
                 startedAt: Date(),
                 message: "Process started as PID \(pid)."
             )
-        case .output(let projectId, let text):
-            appendLog(projectId: projectId, text: text)
         case .exited(let projectId, let code):
             var state = runtimeStates[projectId] ?? .stopped
             state.status = code == 0 ? .stopped : .crashed
+            state.ownership = .none
             state.pid = nil
             state.observedPort = nil
             state.clearSessionTiming()
@@ -1486,6 +1593,7 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     private func appendLog(projectId: UUID, text: String) {
+        processManager.appendLog(projectId: projectId, text: text)
         var state = runtimeStates[projectId] ?? .stopped
         let lines = text
             .split(whereSeparator: \.isNewline)
@@ -1498,6 +1606,15 @@ final class LocalMonitorModel: ObservableObject {
         }
         state.lastMessage = lines.last ?? state.lastMessage
         runtimeStates[projectId] = state
+    }
+
+    private func refreshManagedLogs() {
+        for project in projects where processManager.hasLog(for: project.id) {
+            processManager.maintainLogSize(for: project.id)
+            var state = runtimeStates[project.id] ?? .stopped
+            state.logs = processManager.logLines(for: project.id)
+            runtimeStates[project.id] = state
+        }
     }
 
     private func refreshProjectIdentities(force: Bool = false) async {
@@ -1651,6 +1768,35 @@ final class LocalMonitorModel: ObservableObject {
     private static func loadIgnoredPorts(from defaults: UserDefaults) -> Set<Int> {
         let raw = defaults.array(forKey: ignoredPortsKey) as? [Int] ?? []
         return Set(raw)
+    }
+
+    private var orderedPinnedProjectIDs: [UUID] {
+        projects
+            .enumerated()
+            .filter { $0.element.isQuickLaunchPinned }
+            .sorted { lhs, rhs in
+                let lhsOrder = lhs.element.quickLaunchOrder ?? .max
+                let rhsOrder = rhs.element.quickLaunchOrder ?? .max
+                if lhsOrder != rhsOrder {
+                    return lhsOrder < rhsOrder
+                }
+                return lhs.offset < rhs.offset
+            }
+            .map(\.element.id)
+    }
+
+    private func applyQuickLaunchPinOrder(_ pinnedIDs: [UUID]) {
+        let orderByID = Dictionary(uniqueKeysWithValues: pinnedIDs.enumerated().map { ($0.element, $0.offset) })
+
+        for index in projects.indices {
+            if let order = orderByID[projects[index].id] {
+                projects[index].isQuickLaunchPinned = true
+                projects[index].quickLaunchOrder = order
+            } else {
+                projects[index].isQuickLaunchPinned = false
+                projects[index].quickLaunchOrder = nil
+            }
+        }
     }
 
     private func copyToPasteboard(_ value: String) {

@@ -14,7 +14,7 @@ struct StatusPanelView: View {
     @ObservedObject private var updater = UpdateChecker.shared
 
     @AppStorage(MenuBarDisplayMode.storageKey) private var menuBarDisplayModeRaw = MenuBarDisplayMode.count.rawValue
-    @AppStorage(AppPreference.stopProjectsOnQuitKey) private var stopProjectsOnQuit = false
+    @AppStorage(AppPreference.stopProjectsOnQuitKey) private var stopProjectsOnQuit = AppPreference.stopProjectsOnQuitDefault
     @AppStorage(AppPreference.openBrowserAfterStartKey) private var openBrowserAfterStart = true
     @AppStorage(AppPreference.scanExternalPortsKey) private var scanExternalPorts = true
     @AppStorage(AppPreference.showExternalInMenuBarKey) private var showExternalInMenuBar = true
@@ -40,16 +40,11 @@ struct StatusPanelView: View {
             ZStack {
                 switch activePanel {
                 case .dashboard:
-                    ScrollView {
-                        content
-                            .padding(.horizontal, 12)
-                            .padding(.top, 10)
-                            .padding(.bottom, 12)
-                    }
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .leading).combined(with: .opacity),
-                        removal: .move(edge: .leading).combined(with: .opacity)
-                    ))
+                    dashboard
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .leading).combined(with: .opacity),
+                            removal: .move(edge: .leading).combined(with: .opacity)
+                        ))
                 case .projects:
                     ScrollView {
                         projectsContent
@@ -109,14 +104,47 @@ struct StatusPanelView: View {
         }
     }
 
+    private var dashboard: some View {
+        VStack(spacing: 0) {
+            SummaryCardView(
+                projects: model.quickLaunchProjects,
+                onlineProjectIDs: Set(onlineProjectIDs),
+                runtimeStates: model.runtimeStates,
+                operationStates: model.cleanRestartStates,
+                error: model.lastError
+            ) { project in
+                await model.startProject(project)
+            } onStop: { project in
+                model.stopProject(project)
+            } onRestart: { project in
+                await model.restartProject(project)
+            } onOpen: { project in
+                model.openObservedPort(project)
+            } onLogs: { project in
+                model.selectedLogProjectID = project.id
+            } onSetPinned: { project, pinned in
+                model.setQuickLaunchPinned(project, pinned: pinned)
+            } onMoveProject: { sourceProjectID, targetProjectID in
+                model.moveQuickLaunchProject(sourceProjectID, before: targetProjectID)
+            } onShowProjects: {
+                withAnimation(.snappy(duration: 0.2)) {
+                    activePanel = .projects
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .padding(.bottom, 12)
+
+            ScrollView {
+                content
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 12)
+            }
+        }
+    }
+
     private var content: some View {
         VStack(alignment: .leading, spacing: 12) {
-            SummaryCardView(
-                projects: sortedProjects,
-                onlineProjectIDs: Set(onlineProjectIDs),
-                error: model.lastError
-            )
-
             if model.projects.isEmpty {
                 EmptyStatusView(
                     title: "No Projects Yet",
@@ -276,29 +304,15 @@ struct StatusPanelView: View {
     private var systemPortsSection: some View {
         if !model.systemPortGroups.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
-                Button {
+                collapsibleSectionHeader(
+                    title: "SYSTEM / EMULATOR PORTS",
+                    trailing: "\(model.systemPortGroups.count)/\(model.systemVisiblePorts.count)",
+                    isExpanded: showSystemPorts
+                ) {
                     withAnimation(.snappy(duration: 0.18)) {
                         showSystemPorts.toggle()
                     }
-                } label: {
-                    HStack {
-                        Text("SYSTEM / EMULATOR PORTS")
-                            .font(.system(size: 10, weight: .bold, design: .rounded))
-                            .foregroundStyle(.secondary)
-                            .tracking(0.4)
-
-                        Spacer()
-
-                        Text("\(model.systemPortGroups.count)/\(model.systemVisiblePorts.count)")
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-
-                        Image(systemName: showSystemPorts ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.secondary)
-                    }
                 }
-                .buttonStyle(.plain)
 
                 if showSystemPorts {
                     VStack(spacing: 0) {
@@ -362,7 +376,7 @@ struct StatusPanelView: View {
                 SettingsToggleRowView(
                     icon: "stop.circle",
                     title: "Stop on Quit",
-                    subtitle: "Stop app-started project processes when quitting",
+                    subtitle: "Stop all Local Monitor-managed projects when quitting",
                     isOn: $stopProjectsOnQuit
                 )
 
@@ -777,19 +791,7 @@ struct StatusPanelView: View {
     }
 
     private var sortedProjects: [LocalProject] {
-        model.projects
-            .enumerated()
-            .sorted { lhs, rhs in
-                let lhsRank = projectSortRank(lhs.element)
-                let rhsRank = projectSortRank(rhs.element)
-
-                if lhsRank != rhsRank {
-                    return lhsRank < rhsRank
-                }
-
-                return lhs.offset < rhs.offset
-            }
-            .map(\.element)
+        model.quickLaunchProjects
     }
 
     private var onlineProjects: [LocalProject] {
@@ -812,27 +814,30 @@ struct StatusPanelView: View {
         offlineProjects.map(\.id)
     }
 
-    private func projectSortRank(_ project: LocalProject) -> Int {
-        isProjectOnline(project) ? 0 : 1
-    }
-
     private var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
     }
 
     private func sectionHeader(title: String, trailing: String) -> some View {
-        HStack {
-            Text(title)
-                .font(.system(size: 10, weight: .bold, design: .rounded))
-                .foregroundStyle(.secondary)
-                .tracking(0.4)
+        PanelSectionHeaderView(title: title, trailing: trailing)
+    }
 
-            Spacer()
-
-            Text(trailing)
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                .foregroundStyle(.tertiary)
+    private func collapsibleSectionHeader(
+        title: String,
+        trailing: String,
+        isExpanded: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            PanelSectionHeaderView(
+                title: title,
+                trailing: trailing,
+                chevronSystemName: isExpanded ? "chevron.down" : "chevron.right"
+            )
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(title), \(trailing)")
+        .accessibilityHint(isExpanded ? "Collapse section" : "Expand section")
     }
 
     private func projectGroupHeader(title: String, count: Int, tint: Color) -> some View {
@@ -852,7 +857,7 @@ struct StatusPanelView: View {
                 .font(.system(size: 9, weight: .bold, design: .monospaced))
                 .foregroundStyle(.tertiary)
         }
-        .padding(.horizontal, 2)
+        .padding(.horizontal, 12)
     }
 
     private func settingsValueRow(icon: String, title: String, subtitle: String, value: String) -> some View {
@@ -901,12 +906,123 @@ struct StatusPanelView: View {
     }
 }
 
+private struct PanelSectionHeaderView: View {
+    let title: String
+    let trailing: String
+    var chevronSystemName: String? = nil
+
+    var body: some View {
+        HStack {
+            Text(title)
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .tracking(0.4)
+
+            Spacer()
+
+            Text(trailing)
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(.tertiary)
+
+            if let chevronSystemName {
+                Image(systemName: chevronSystemName)
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 12)
+    }
+}
+
+private enum QuickLaunchItem: Identifiable {
+    case project(LocalProject)
+    case overflow(Int)
+
+    var id: String {
+        switch self {
+        case .project(let project):
+            return "project-\(project.id.uuidString)"
+        case .overflow:
+            return "overflow"
+        }
+    }
+}
+
+private struct QuickLaunchRow: Identifiable {
+    let id: String
+    let items: [QuickLaunchItem]
+}
+
+private struct FixedAnchorRowLayout: Layout {
+    let anchorCount: Int
+    let minimumSpacing: CGFloat
+
+    func sizeThatFits(
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) -> CGSize {
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        let maximumItemWidth = sizes.map(\.width).max() ?? 0
+        let spacingWidth = minimumSpacing * CGFloat(max(anchorCount - 1, 0))
+        let contentWidth = maximumItemWidth * CGFloat(anchorCount) + spacingWidth
+        let proposedWidth = proposal.width.flatMap { $0.isFinite ? $0 : nil }
+
+        return CGSize(
+            width: max(proposedWidth ?? contentWidth, contentWidth),
+            height: sizes.map(\.height).max() ?? 0
+        )
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        let maximumItemWidth = sizes.map(\.width).max() ?? 0
+        let anchorSpacing = anchorCount > 1
+            ? max(
+                maximumItemWidth + minimumSpacing,
+                (bounds.width - maximumItemWidth) / CGFloat(anchorCount - 1)
+            )
+            : 0
+
+        for (index, subview) in subviews.enumerated() {
+            let size = sizes[index]
+            subview.place(
+                at: CGPoint(
+                    x: bounds.minX + CGFloat(index) * anchorSpacing,
+                    y: bounds.midY
+                ),
+                anchor: .leading,
+                proposal: ProposedViewSize(width: size.width, height: size.height)
+            )
+        }
+    }
+}
+
 private struct SummaryCardView: View {
     let projects: [LocalProject]
     let onlineProjectIDs: Set<UUID>
+    let runtimeStates: [UUID: ProjectRuntimeState]
+    let operationStates: [UUID: CleanRestartState]
     let error: String?
+    let onStart: (LocalProject) async -> Void
+    let onStop: (LocalProject) -> Void
+    let onRestart: (LocalProject) async -> Void
+    let onOpen: (LocalProject) -> Void
+    let onLogs: (LocalProject) -> Void
+    let onSetPinned: (LocalProject, Bool) -> Void
+    let onMoveProject: (UUID, UUID) -> Bool
+    let onShowProjects: () -> Void
 
-    private let visibleProjectLimit = 12
+    private let maximumVisibleItems = 20
+    private let projectsPerRow = 10
+    @State private var pendingStartProjectIDs: Set<UUID> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -916,7 +1032,7 @@ private struct SummaryCardView: View {
                         .font(.system(size: 13, weight: .bold))
                         .foregroundStyle(.green)
 
-                    Text("Running Projects")
+                    Text("Quick Launch")
                         .font(.system(size: 12, weight: .bold))
                 }
 
@@ -941,39 +1057,91 @@ private struct SummaryCardView: View {
     }
 
     private var projectIconStrip: some View {
-        HStack(spacing: 8) {
+        Group {
             if projects.isEmpty {
                 Text("No projects yet")
                     .font(.system(size: 10.5, weight: .semibold))
                     .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                ForEach(Array(projects.prefix(visibleProjectLimit))) { project in
-                    ProjectAvatarView(project: project, tint: avatarTint(for: project))
-                        .opacity(isOnline(project) ? 1 : 0.28)
-                        .help(project.displayName)
-                        .accessibilityLabel(project.displayName)
-                }
+                VStack(spacing: 9) {
+                    ForEach(projectRows) { row in
+                        FixedAnchorRowLayout(anchorCount: projectsPerRow, minimumSpacing: 8) {
+                            ForEach(row.items) { item in
+                                switch item {
+                                case .project(let project):
+                                    QuickLaunchProjectButton(
+                                        project: project,
+                                        state: runtimeStates[project.id] ?? .stopped,
+                                        operationState: operationStates[project.id],
+                                        isOnline: isOnline(project),
+                                        isPendingStart: pendingStartProjectIDs.contains(project.id),
+                                        tint: avatarTint(for: project)
+                                    ) {
+                                        start(project)
+                                    } onStop: {
+                                        onStop(project)
+                                    } onRestart: {
+                                        Task { await onRestart(project) }
+                                    } onOpen: {
+                                        onOpen(project)
+                                    } onLogs: {
+                                        onLogs(project)
+                                    } onSetPinned: { pinned in
+                                        onSetPinned(project, pinned)
+                                    } onMoveProject: { sourceProjectID in
+                                        onMoveProject(sourceProjectID, project.id)
+                                    }
 
-                if hiddenProjectCount > 0 {
-                    Text("+\(hiddenProjectCount)")
-                        .font(.system(size: 10, weight: .bold, design: .rounded))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 24, height: 24)
-                        .background {
-                            Circle()
-                                .fill(Color.primary.opacity(0.08))
+                                case .overflow(let hiddenCount):
+                                    Button(action: onShowProjects) {
+                                        Text("+\(hiddenCount)")
+                                            .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                                            .foregroundStyle(.secondary)
+                                            .frame(width: 28, height: 28)
+                                            .background {
+                                                Circle()
+                                                    .fill(Color.primary.opacity(0.08))
+                                            }
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("\(hiddenCount) more projects")
+                                    .accessibilityLabel("Show \(hiddenCount) more projects")
+                                }
+                            }
                         }
-                        .help("\(hiddenProjectCount) more projects")
+                        .frame(maxWidth: .infinity)
+                    }
                 }
             }
-
-            Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var hiddenProjectCount: Int {
-        max(projects.count - visibleProjectLimit, 0)
+    private var projectRows: [QuickLaunchRow] {
+        let items = visibleItems
+        var rows: [QuickLaunchRow] = []
+        var startIndex = 0
+
+        while startIndex < items.count {
+            let endIndex = min(startIndex + projectsPerRow, items.count)
+            let rowItems = Array(items[startIndex..<endIndex])
+            guard let firstItem = rowItems.first else { break }
+            rows.append(QuickLaunchRow(id: firstItem.id, items: rowItems))
+            startIndex = endIndex
+        }
+
+        return rows
+    }
+
+    private var visibleItems: [QuickLaunchItem] {
+        guard projects.count > maximumVisibleItems else {
+            return projects.map(QuickLaunchItem.project)
+        }
+
+        let visibleProjectCount = maximumVisibleItems - 1
+        let hiddenCount = projects.count - visibleProjectCount
+        return projects.prefix(visibleProjectCount).map(QuickLaunchItem.project) + [.overflow(hiddenCount)]
     }
 
     private var runningCount: Int {
@@ -982,6 +1150,15 @@ private struct SummaryCardView: View {
 
     private var statusText: String {
         "\(runningCount) Running"
+    }
+
+    private func start(_ project: LocalProject) {
+        guard pendingStartProjectIDs.insert(project.id).inserted else { return }
+
+        Task { @MainActor in
+            await onStart(project)
+            pendingStartProjectIDs.remove(project.id)
+        }
     }
 
     private func isOnline(_ project: LocalProject) -> Bool {
@@ -1006,6 +1183,208 @@ private struct SummaryCardView: View {
             return .indigo
         case .unknown:
             return .blue
+        }
+    }
+}
+
+private struct QuickLaunchProjectButton: View {
+    let project: LocalProject
+    let state: ProjectRuntimeState
+    let operationState: CleanRestartState?
+    let isOnline: Bool
+    let isPendingStart: Bool
+    let tint: Color
+    let onStart: () -> Void
+    let onStop: () -> Void
+    let onRestart: () -> Void
+    let onOpen: () -> Void
+    let onLogs: () -> Void
+    let onSetPinned: (Bool) -> Void
+    let onMoveProject: (UUID) -> Bool
+
+    var body: some View {
+        Button(action: performPrimaryAction) {
+            ProjectAvatarView(project: project, tint: tint, size: 28)
+                .opacity(avatarOpacity)
+                .overlay {
+                    Circle()
+                        .strokeBorder(statusTint, lineWidth: statusLineWidth)
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if isBusy {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .scaleEffect(0.65)
+                            .frame(width: 10, height: 10)
+                            .background {
+                                Circle()
+                                    .fill(Color.black.opacity(0.82))
+                            }
+                    }
+                }
+                .overlay(alignment: .topTrailing) {
+                    if project.isQuickLaunchPinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 6.5, weight: .bold))
+                            .foregroundStyle(.yellow)
+                            .frame(width: 10, height: 10)
+                            .background {
+                                Circle()
+                                    .fill(Color.black.opacity(0.82))
+                            }
+                            .offset(x: 2, y: -2)
+                            .accessibilityHidden(true)
+                    }
+                }
+        }
+        .buttonStyle(.plain)
+        .disabled(primaryActionDisabled)
+        .help(helpText)
+        .accessibilityLabel("\(project.displayName), \(effectiveStatusText)")
+        .accessibilityHint(primaryActionHint)
+        .accessibilityAction(named: project.isQuickLaunchPinned ? "Unpin from Quick Launch" : "Pin to Quick Launch") {
+            onSetPinned(!project.isQuickLaunchPinned)
+        }
+        .draggable(project.id.uuidString)
+        .dropDestination(for: String.self) { projectIDs, _ in
+            guard
+                let rawProjectID = projectIDs.first,
+                let sourceProjectID = UUID(uuidString: rawProjectID)
+            else {
+                return false
+            }
+
+            return onMoveProject(sourceProjectID)
+        }
+        .contextMenu {
+            Button(action: onStart) {
+                Label("Start", systemImage: "play.fill")
+            }
+            .disabled(!canStart || isBusy)
+
+            Button(action: onStop) {
+                Label("Stop", systemImage: "stop.fill")
+            }
+            .disabled(!canStop || isBusy)
+
+            Button(action: onRestart) {
+                Label("Restart", systemImage: "arrow.clockwise")
+            }
+            .disabled(isBusy)
+
+            Divider()
+
+            Button(action: onOpen) {
+                Label("Open Localhost", systemImage: "safari")
+            }
+
+            Button(action: onLogs) {
+                Label("Show Logs", systemImage: "doc.text.magnifyingglass")
+            }
+
+            Divider()
+
+            Button {
+                onSetPinned(!project.isQuickLaunchPinned)
+            } label: {
+                Label(
+                    project.isQuickLaunchPinned ? "Unpin from Quick Launch" : "Pin to Quick Launch",
+                    systemImage: project.isQuickLaunchPinned ? "pin.slash" : "pin.fill"
+                )
+            }
+        }
+    }
+
+    private var isBusy: Bool {
+        isPendingStart || state.status == .starting || operationState?.isActive == true
+    }
+
+    private var canStart: Bool {
+        switch state.status {
+        case .stopped, .portBusy, .crashed:
+            return true
+        case .starting, .running, .portMismatch, .noPort, .noResponse:
+            return false
+        }
+    }
+
+    private var canStop: Bool {
+        switch state.status {
+        case .stopped, .portBusy:
+            return false
+        case .starting, .running, .portMismatch, .noPort, .noResponse, .crashed:
+            return true
+        }
+    }
+
+    private var opensOnPrimaryAction: Bool {
+        switch state.status {
+        case .running, .portMismatch, .noPort, .noResponse:
+            return true
+        case .stopped, .starting, .portBusy, .crashed:
+            return false
+        }
+    }
+
+    private var primaryActionDisabled: Bool {
+        isBusy || (!opensOnPrimaryAction && !canStart)
+    }
+
+    private var avatarOpacity: Double {
+        if isBusy || isOnline { return 1 }
+
+        switch state.status {
+        case .portBusy, .noPort, .noResponse, .crashed:
+            return 0.72
+        case .stopped:
+            return 0.42
+        case .starting, .running, .portMismatch:
+            return 1
+        }
+    }
+
+    private var statusTint: Color {
+        if isBusy { return .orange }
+
+        switch state.status {
+        case .running:
+            return .green
+        case .starting, .portBusy, .portMismatch, .noPort:
+            return .orange
+        case .noResponse, .crashed:
+            return .red
+        case .stopped:
+            return .clear
+        }
+    }
+
+    private var statusLineWidth: CGFloat {
+        !isBusy && state.status == .stopped ? 0 : 1.5
+    }
+
+    private var effectiveStatusText: String {
+        isPendingStart ? "Starting" : state.status.displayName
+    }
+
+    private var primaryActionHint: String {
+        if isBusy { return "Please wait" }
+        return opensOnPrimaryAction ? "Open localhost" : "Start project"
+    }
+
+    private var helpText: String {
+        if isBusy {
+            return "\(project.displayName) — \(effectiveStatusText)"
+        }
+
+        let action = opensOnPrimaryAction ? "Open" : "Start"
+        return "\(project.displayName) — \(effectiveStatusText) · \(action)"
+    }
+
+    private func performPrimaryAction() {
+        if opensOnPrimaryAction {
+            onOpen()
+        } else if canStart {
+            onStart()
         }
     }
 }

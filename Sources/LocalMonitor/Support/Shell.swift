@@ -80,7 +80,12 @@ enum Shell {
 
 enum ProcessTree {
     static func terminate(pid: Int32) {
-        let allPids = descendants(of: pid).reversed() + [pid]
+        terminate(pids: [pid])
+    }
+
+    static func terminate(pids: [Int32]) {
+        let roots = Array(Set(pids.filter { $0 > 1 }))
+        let allPids = Array(Set(roots.flatMap { descendants(of: $0).reversed() + [$0] }))
         for childPID in allPids {
             _ = Darwin.kill(childPID, SIGTERM)
         }
@@ -90,6 +95,36 @@ enum ProcessTree {
         for childPID in allPids where Darwin.kill(childPID, 0) == 0 {
             _ = Darwin.kill(childPID, SIGKILL)
         }
+    }
+
+    static func isAlive(_ pid: Int32) -> Bool {
+        guard pid > 1 else { return false }
+        if Darwin.kill(pid, 0) == 0 { return true }
+        return errno == EPERM
+    }
+
+    static func startDate(of pid: Int32) -> Date? {
+        guard
+            let result = try? Shell.runSync(
+                "/bin/ps",
+                arguments: ["-p", "\(pid)", "-o", "lstart="],
+                timeout: 2
+            ),
+            result.status == 0
+        else {
+            return nil
+        }
+
+        let normalized = result.stdout
+            .split(whereSeparator: \Character.isWhitespace)
+            .joined(separator: " ")
+        guard !normalized.isEmpty else { return nil }
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "EEE MMM d HH:mm:ss yyyy"
+        formatter.isLenient = true
+        return formatter.date(from: normalized)
     }
 
     static func isDescendant(_ pid: Int32, of rootPID: Int32) -> Bool {

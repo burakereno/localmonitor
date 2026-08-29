@@ -109,7 +109,7 @@ final class RuntimeSessionTests: XCTestCase {
     }
 
     @MainActor
-    func testStopAllProjectsClearsPersistedRuntimeSessions() throws {
+    func testStopAllProjectsPreservesUnownedRuntimeSessions() throws {
         let suiteName = "LocalMonitorTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer {
@@ -155,7 +155,7 @@ final class RuntimeSessionTests: XCTestCase {
 
         model.stopAllProjects()
 
-        XCTAssertNil(defaults.data(forKey: runtimeSessionsKey))
+        XCTAssertNotNil(defaults.data(forKey: runtimeSessionsKey))
         XCTAssertEqual(model.runtimeState(for: project).status, .stopped)
     }
 
