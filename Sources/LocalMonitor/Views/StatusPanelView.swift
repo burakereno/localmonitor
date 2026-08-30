@@ -936,6 +936,67 @@ private struct PanelSectionHeaderView: View {
     }
 }
 
+struct QuickLaunchRowPlan {
+    let priorityProjectRows: [[LocalProject]]
+    let regularProjectRows: [[LocalProject]]
+    let hiddenProjectCount: Int
+
+    static func make(
+        projects: [LocalProject],
+        onlineProjectIDs: Set<UUID>,
+        projectsPerRow: Int,
+        maximumVisibleItems: Int
+    ) -> QuickLaunchRowPlan {
+        guard projectsPerRow > 0, maximumVisibleItems > 0 else {
+            return QuickLaunchRowPlan(
+                priorityProjectRows: [],
+                regularProjectRows: [],
+                hiddenProjectCount: projects.count
+            )
+        }
+
+        let pinnedProjects = projects.filter(\.isQuickLaunchPinned)
+        let runningUnpinnedProjects = projects.filter {
+            !$0.isQuickLaunchPinned && onlineProjectIDs.contains($0.id)
+        }
+        let regularProjects = projects.filter {
+            !$0.isQuickLaunchPinned && !onlineProjectIDs.contains($0.id)
+        }
+        let priorityProjects = pinnedProjects + runningUnpinnedProjects
+        let visibleProjectLimit = projects.count > maximumVisibleItems
+            ? maximumVisibleItems - 1
+            : maximumVisibleItems
+        let visiblePriorityProjects = Array(priorityProjects.prefix(visibleProjectLimit))
+        let remainingCapacity = max(visibleProjectLimit - visiblePriorityProjects.count, 0)
+        let visibleRegularProjects = Array(regularProjects.prefix(remainingCapacity))
+        let hiddenProjectCount = projects.count
+            - visiblePriorityProjects.count
+            - visibleRegularProjects.count
+
+        return QuickLaunchRowPlan(
+            priorityProjectRows: rows(for: visiblePriorityProjects, projectsPerRow: projectsPerRow),
+            regularProjectRows: rows(for: visibleRegularProjects, projectsPerRow: projectsPerRow),
+            hiddenProjectCount: hiddenProjectCount
+        )
+    }
+
+    private static func rows(
+        for projects: [LocalProject],
+        projectsPerRow: Int
+    ) -> [[LocalProject]] {
+        var rows: [[LocalProject]] = []
+        var startIndex = 0
+
+        while startIndex < projects.count {
+            let endIndex = min(startIndex + projectsPerRow, projects.count)
+            rows.append(Array(projects[startIndex..<endIndex]))
+            startIndex = endIndex
+        }
+
+        return rows
+    }
+}
+
 private enum QuickLaunchItem: Identifiable {
     case project(LocalProject)
     case overflow(Int)
@@ -1119,29 +1180,34 @@ private struct SummaryCardView: View {
     }
 
     private var projectRows: [QuickLaunchRow] {
-        let items = visibleItems
-        var rows: [QuickLaunchRow] = []
-        var startIndex = 0
+        let plan = QuickLaunchRowPlan.make(
+            projects: projects,
+            onlineProjectIDs: onlineProjectIDs,
+            projectsPerRow: projectsPerRow,
+            maximumVisibleItems: maximumVisibleItems
+        )
+        var rows = plan.priorityProjectRows.map(makeRow)
+        var regularRows = plan.regularProjectRows.map(makeRow)
 
-        while startIndex < items.count {
-            let endIndex = min(startIndex + projectsPerRow, items.count)
-            let rowItems = Array(items[startIndex..<endIndex])
-            guard let firstItem = rowItems.first else { break }
-            rows.append(QuickLaunchRow(id: firstItem.id, items: rowItems))
-            startIndex = endIndex
+        if plan.hiddenProjectCount > 0 {
+            let overflowItem = QuickLaunchItem.overflow(plan.hiddenProjectCount)
+            if let lastRow = regularRows.last, lastRow.items.count < projectsPerRow {
+                regularRows[regularRows.count - 1] = QuickLaunchRow(
+                    id: lastRow.id,
+                    items: lastRow.items + [overflowItem]
+                )
+            } else {
+                regularRows.append(QuickLaunchRow(id: overflowItem.id, items: [overflowItem]))
+            }
         }
 
+        rows.append(contentsOf: regularRows)
         return rows
     }
 
-    private var visibleItems: [QuickLaunchItem] {
-        guard projects.count > maximumVisibleItems else {
-            return projects.map(QuickLaunchItem.project)
-        }
-
-        let visibleProjectCount = maximumVisibleItems - 1
-        let hiddenCount = projects.count - visibleProjectCount
-        return projects.prefix(visibleProjectCount).map(QuickLaunchItem.project) + [.overflow(hiddenCount)]
+    private func makeRow(_ projects: [LocalProject]) -> QuickLaunchRow {
+        let items = projects.map(QuickLaunchItem.project)
+        return QuickLaunchRow(id: items[0].id, items: items)
     }
 
     private var runningCount: Int {

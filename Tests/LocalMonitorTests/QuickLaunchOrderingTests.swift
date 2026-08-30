@@ -89,6 +89,33 @@ final class QuickLaunchOrderingTests: XCTestCase {
         XCTAssertNil(project.lastUsedAt)
     }
 
+    func testPinnedAndRunningProjectsUsePriorityRows() {
+        let pinnedOffline = project(name: "pinned-offline", isPinned: true, order: 0)
+        let pinnedRunning = project(name: "pinned-running", isPinned: true, order: 1)
+        let running = project(name: "running")
+        let offlineProjects = (1...9).map { project(name: "offline-\($0)") }
+        let projects = [pinnedOffline, pinnedRunning, running] + offlineProjects
+
+        let plan = QuickLaunchRowPlan.make(
+            projects: projects,
+            onlineProjectIDs: [pinnedRunning.id, running.id],
+            projectsPerRow: 10,
+            maximumVisibleItems: 20
+        )
+
+        XCTAssertEqual(
+            plan.priorityProjectRows.flatMap { $0 }.map(\.name),
+            ["pinned-offline", "pinned-running", "running"]
+        )
+        XCTAssertEqual(
+            plan.regularProjectRows.flatMap { $0 }.map(\.name),
+            offlineProjects.map(\.name)
+        )
+        XCTAssertEqual(plan.priorityProjectRows.count, 1)
+        XCTAssertEqual(plan.regularProjectRows.count, 1)
+        XCTAssertEqual(plan.hiddenProjectCount, 0)
+    }
+
     private func project(
         name: String,
         isPinned: Bool = false,
