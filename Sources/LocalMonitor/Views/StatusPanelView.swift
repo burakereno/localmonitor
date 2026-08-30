@@ -74,7 +74,7 @@ struct StatusPanelView: View {
 
             footer
         }
-        .frame(width: 420, height: 620)
+        .frame(width: 420, height: 840)
         .preferredColorScheme(.dark)
         .onAppear {
             launchAtLogin.refresh()

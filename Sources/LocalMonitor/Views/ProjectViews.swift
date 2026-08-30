@@ -38,6 +38,7 @@ struct ProjectCardView: View {
                 HStack(spacing: 6) {
                     ProjectStartButton(
                         status: state.status,
+                        isExternal: state.ownership == .external,
                         disabled: startDisabled,
                         action: onStart
                     )
@@ -63,9 +64,6 @@ struct ProjectCardView: View {
             HStack(spacing: 6) {
                 ProjectKindChip(kind: project.kind)
                 MetadataChip(icon: "number", text: "\(project.port)")
-                if state.ownership == .external {
-                    MetadataChip(icon: "arrow.up.right.square", text: "External")
-                }
                 if let branch = identity?.branch {
                     MetadataChip(icon: "arrow.triangle.branch", text: branch)
                 }
@@ -217,6 +215,7 @@ struct ProjectCardView: View {
 
 struct ProjectStartButton: View {
     let status: ProjectRunStatus
+    let isExternal: Bool
     let disabled: Bool
     let action: () -> Void
 
@@ -247,9 +246,10 @@ struct ProjectStartButton: View {
                         .font(.system(size: 9, weight: .bold))
                 }
 
-                Text(status.displayName)
+                Text(statusText)
                     .font(.system(size: 10, weight: .semibold))
                     .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
             }
             .foregroundStyle(tint)
             .padding(.horizontal, 8)
@@ -316,7 +316,12 @@ struct ProjectStartButton: View {
     }
 
     private var helpText: String {
-        showsStatusPill ? status.displayName : "Start"
+        guard showsStatusPill else { return "Start" }
+        return isExternal ? "\(status.displayName) — External process" : status.displayName
+    }
+
+    private var statusText: String {
+        isExternal ? "\(status.displayName) (Ext.)" : status.displayName
     }
 }
 
@@ -506,20 +511,16 @@ struct CacheControlRowView: View {
             .help(buttonHelp)
             .accessibilityLabel("Cache")
 
-            Text(sizeText)
+            Text(valueText)
                 .font(.system(size: 10, weight: .semibold, design: .rounded))
                 .foregroundStyle(textTint)
                 .lineLimit(1)
-                .frame(minWidth: 56, alignment: .leading)
+                .fixedSize(horizontal: true, vertical: false)
 
             CacheUsageBarView(ratio: barRatio, tint: tint)
-
-            Text(limitText)
-                .font(.system(size: 9, weight: .semibold, design: .rounded))
-                .foregroundStyle(trailingTint)
-                .lineLimit(1)
         }
-        .padding(8)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
         .background {
             RoundedRectangle(cornerRadius: 7)
                 .fill(tint.opacity(0.065))
@@ -527,7 +528,7 @@ struct CacheControlRowView: View {
         .help(helpText)
     }
 
-    private var sizeText: String {
+    private var valueText: String {
         if let operationState {
             switch operationState.phase {
             case .done:
@@ -535,28 +536,13 @@ struct CacheControlRowView: View {
             case .failed:
                 return "Failed"
             case .stopping, .cleaning, .starting, .checking:
-                return operationState.message
+                let percent = Int((operationState.progress * 100).rounded())
+                return "\(operationState.message) · \(percent)%"
             }
         }
 
         guard let cacheState else { return "Measuring" }
-        return Self.formatter.string(fromByteCount: cacheState.bytes)
-    }
-
-    private var limitText: String {
-        if let operationState {
-            switch operationState.phase {
-            case .done:
-                return "Done"
-            case .failed:
-                return "Error"
-            case .stopping, .cleaning, .starting, .checking:
-                return "\(Int((operationState.progress * 100).rounded()))%"
-            }
-        }
-
-        guard let cacheState else { return "" }
-        return Self.formatter.string(fromByteCount: cacheState.limitBytes)
+        return CacheUsageFormatter.string(bytes: cacheState.bytes, limitBytes: cacheState.limitBytes)
     }
 
     private var helpText: String {
@@ -569,7 +555,7 @@ struct CacheControlRowView: View {
         }
 
         let percent = Int((cacheState.fillRatio * 100).rounded())
-        return "\(sizeText) cache, \(percent)% of \(limitText) scale"
+        return "\(valueText) cache, \(percent)% of limit"
     }
 
     private var tint: Color {
@@ -607,10 +593,6 @@ struct CacheControlRowView: View {
         case .stopping, .cleaning, .starting, .checking:
             return .orange
         }
-    }
-
-    private var trailingTint: Color {
-        operationState == nil ? Color.secondary.opacity(0.55) : tint.opacity(0.85)
     }
 
     private var barRatio: Double {
@@ -652,14 +634,6 @@ struct CacheControlRowView: View {
         return "Clean cache"
     }
 
-    private static let formatter: ByteCountFormatter = {
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useKB, .useMB, .useGB]
-        formatter.countStyle = .file
-        formatter.includesUnit = true
-        formatter.isAdaptive = true
-        return formatter
-    }()
 }
 
 struct CacheUsageBarView: View {

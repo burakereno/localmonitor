@@ -507,6 +507,25 @@ struct ProjectCacheState: Equatable {
     }
 }
 
+enum CacheUsageFormatter {
+    static func string(
+        bytes: Int64,
+        limitBytes: Int64,
+        locale: Locale = .autoupdatingCurrent
+    ) -> String {
+        let usesGigabytes = limitBytes >= 1_000_000_000
+        let divisor = usesGigabytes ? 1_000_000_000.0 : 1_000_000.0
+        let unit = usesGigabytes ? "GB" : "MB"
+        let numberStyle = FloatingPointFormatStyle<Double>.number
+            .locale(locale)
+            .precision(.fractionLength(0...1))
+        let usedValue = Double(max(bytes, 0)) / divisor
+        let limitValue = Double(max(limitBytes, 0)) / divisor
+
+        return "\(usedValue.formatted(numberStyle))/\(limitValue.formatted(numberStyle)) \(unit)"
+    }
+}
+
 struct WorkspaceGroup: Identifiable, Codable, Equatable {
     var id: UUID
     var name: String
