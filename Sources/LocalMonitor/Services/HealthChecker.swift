@@ -1,13 +1,17 @@
 import Foundation
 
-struct HealthChecker {
+protocol HealthChecking {
+    func check(_ project: LocalProject) async -> HealthState
+}
+
+struct HealthChecker: HealthChecking {
     func check(_ project: LocalProject) async -> HealthState {
         guard let url = project.healthURL else {
             return .unreachable("Invalid URL")
         }
 
         let start = Date()
-        var request = URLRequest(url: url, timeoutInterval: 2.5)
+        var request = URLRequest(url: url, timeoutInterval: 5)
         request.httpMethod = "HEAD"
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
 

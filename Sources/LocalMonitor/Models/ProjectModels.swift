@@ -337,6 +337,8 @@ enum ProjectRunStatus: Equatable {
     case stopped
     case starting
     case running
+    case warmingUp
+    case responseDelayed
     case portBusy
     case portMismatch
     case noPort
@@ -351,6 +353,10 @@ enum ProjectRunStatus: Equatable {
             return "Starting"
         case .running:
             return "Running"
+        case .warmingUp:
+            return "Preparing"
+        case .responseDelayed:
+            return "Response Delayed"
         case .portBusy:
             return "Port Busy"
         case .portMismatch:
@@ -381,6 +387,7 @@ struct ProjectRuntimeState: Equatable {
     var lastMessage: String?
     var observedPort: Int?
     var logs: [String] = []
+    var readiness = ProjectReadinessState()
 
     static let stopped = ProjectRuntimeState()
 

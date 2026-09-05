@@ -6,11 +6,14 @@ final class NotificationService {
     static let shared = NotificationService()
 
     private var authorizationRequested = false
+    private let isEnabled: () -> Bool
 
-    private init() {}
+    init(isEnabled: @escaping () -> Bool = { AppPreference.notifications }) {
+        self.isEnabled = isEnabled
+    }
 
     func prepare() {
-        guard AppPreference.notifications else { return }
+        guard isEnabled() else { return }
         guard !authorizationRequested else { return }
         authorizationRequested = true
 
@@ -22,7 +25,7 @@ final class NotificationService {
     }
 
     func notify(title: String, body: String) {
-        guard AppPreference.notifications else { return }
+        guard isEnabled() else { return }
         prepare()
 
         let content = UNMutableNotificationContent()

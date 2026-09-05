@@ -32,6 +32,7 @@
 - **Framework detection** — detects Next.js, Astro, Hono, Vite, and other common local web app setups
 - **Stable project ports** — stores each project's preferred port and warns when a process starts elsewhere
 - **Online / offline grouping** — keeps running projects separated from stopped projects
+- **Optional HTTP health checks** — allows 30 seconds for initial preparation and requires three consecutive failed checks before showing No Response; disabling checks uses listening ports only
 - **Cache cleanup** — shows framework cache size and cleans Next.js / Astro cache folders on demand
 - **Workspace groups** — start or stop saved groups of projects together
 - **Logs and quick actions** — copy localhost URLs, open in browser, inspect logs, and reveal folders

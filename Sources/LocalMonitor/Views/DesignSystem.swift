@@ -80,7 +80,7 @@ struct StatusBadge: View {
         switch status {
         case .stopped:
             return .secondary
-        case .starting:
+        case .starting, .warmingUp, .responseDelayed:
             return .orange
         case .running:
             return .green
@@ -114,7 +114,7 @@ struct StatusDot: View {
         switch status {
         case .running:
             return .green
-        case .starting, .portBusy, .portMismatch, .noPort:
+        case .starting, .warmingUp, .responseDelayed, .portBusy, .portMismatch, .noPort:
             return .orange
         case .noResponse, .crashed:
             return .red

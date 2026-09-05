@@ -467,7 +467,7 @@ struct StatusPanelView: View {
                 SettingsToggleRowView(
                     icon: "heart.text.square",
                     title: "Health Checks",
-                    subtitle: "Occasionally check HTTP readiness",
+                    subtitle: "Check HTTP responses; off uses listening ports",
                     isOn: $healthChecks
                 )
 
@@ -1369,7 +1369,7 @@ private struct QuickLaunchProjectButton: View {
         switch state.status {
         case .stopped, .portBusy, .crashed:
             return true
-        case .starting, .running, .portMismatch, .noPort, .noResponse:
+        case .starting, .running, .warmingUp, .responseDelayed, .portMismatch, .noPort, .noResponse:
             return false
         }
     }
@@ -1378,14 +1378,14 @@ private struct QuickLaunchProjectButton: View {
         switch state.status {
         case .stopped, .portBusy:
             return false
-        case .starting, .running, .portMismatch, .noPort, .noResponse, .crashed:
+        case .starting, .running, .warmingUp, .responseDelayed, .portMismatch, .noPort, .noResponse, .crashed:
             return true
         }
     }
 
     private var opensOnPrimaryAction: Bool {
         switch state.status {
-        case .running, .portMismatch, .noPort, .noResponse:
+        case .running, .warmingUp, .responseDelayed, .portMismatch, .noPort, .noResponse:
             return true
         case .stopped, .starting, .portBusy, .crashed:
             return false
@@ -1404,7 +1404,7 @@ private struct QuickLaunchProjectButton: View {
             return 0.72
         case .stopped:
             return 0.42
-        case .starting, .running, .portMismatch:
+        case .starting, .running, .warmingUp, .responseDelayed, .portMismatch:
             return 1
         }
     }
@@ -1415,7 +1415,7 @@ private struct QuickLaunchProjectButton: View {
         switch state.status {
         case .running:
             return .green
-        case .starting, .portBusy, .portMismatch, .noPort:
+        case .starting, .warmingUp, .responseDelayed, .portBusy, .portMismatch, .noPort:
             return .orange
         case .noResponse, .crashed:
             return .red

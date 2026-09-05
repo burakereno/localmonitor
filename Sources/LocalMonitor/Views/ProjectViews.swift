@@ -161,7 +161,7 @@ struct ProjectCardView: View {
 
     private var startDisabled: Bool {
         switch state.status {
-        case .running, .starting, .portMismatch, .noPort, .noResponse:
+        case .running, .warmingUp, .responseDelayed, .starting, .portMismatch, .noPort, .noResponse:
             return true
         case .stopped, .portBusy, .crashed:
             return cleanRestartState?.isActive == true
@@ -172,14 +172,14 @@ struct ProjectCardView: View {
         switch state.status {
         case .stopped, .portBusy:
             return true
-        case .starting, .running, .portMismatch, .noPort, .noResponse, .crashed:
+        case .starting, .running, .warmingUp, .responseDelayed, .portMismatch, .noPort, .noResponse, .crashed:
             return false
         }
     }
 
     private var showsUptime: Bool {
         switch state.status {
-        case .running, .starting, .portMismatch, .noPort, .noResponse:
+        case .running, .warmingUp, .responseDelayed, .starting, .portMismatch, .noPort, .noResponse:
             return true
         case .stopped, .portBusy, .crashed:
             return false
@@ -199,7 +199,7 @@ struct ProjectCardView: View {
         switch state.status {
         case .running:
             return .green.opacity(0.42)
-        case .starting, .portBusy, .portMismatch, .noPort:
+        case .starting, .warmingUp, .responseDelayed, .portBusy, .portMismatch, .noPort:
             return .orange.opacity(0.46)
         case .noResponse, .crashed:
             return .red.opacity(0.48)
@@ -233,7 +233,7 @@ struct ProjectStartButton: View {
     private var content: some View {
         if showsStatusPill {
             HStack(spacing: 5) {
-                if status == .starting {
+                if status == .starting || status == .warmingUp {
                     ProgressView()
                         .controlSize(.small)
                         .frame(width: 10, height: 10)
@@ -272,7 +272,7 @@ struct ProjectStartButton: View {
 
     private var showsStatusPill: Bool {
         switch status {
-        case .starting, .running, .portMismatch, .noPort, .noResponse:
+        case .starting, .running, .warmingUp, .responseDelayed, .portMismatch, .noPort, .noResponse:
             return true
         case .stopped, .portBusy, .crashed:
             return false
@@ -283,7 +283,7 @@ struct ProjectStartButton: View {
         switch status {
         case .running:
             return .green
-        case .starting, .portMismatch, .noPort:
+        case .starting, .warmingUp, .responseDelayed, .portMismatch, .noPort:
             return .orange
         case .noResponse:
             return .red
@@ -302,8 +302,10 @@ struct ProjectStartButton: View {
             return "network.slash"
         case .noResponse:
             return "wifi.exclamationmark"
-        case .starting:
+        case .starting, .warmingUp:
             return "hourglass"
+        case .responseDelayed:
+            return "clock"
         case .running:
             return "checkmark.circle"
         case .stopped:
@@ -349,7 +351,7 @@ struct ProjectInlineStatusChip: View {
 
     private var tint: Color {
         switch status {
-        case .starting, .portMismatch, .noPort:
+        case .starting, .warmingUp, .responseDelayed, .portMismatch, .noPort:
             return .orange
         case .running:
             return .green
@@ -368,8 +370,10 @@ struct ProjectInlineStatusChip: View {
             return "network.slash"
         case .noResponse:
             return "wifi.exclamationmark"
-        case .starting:
+        case .starting, .warmingUp:
             return "hourglass"
+        case .responseDelayed:
+            return "clock"
         case .running:
             return "checkmark.circle"
         case .stopped:
@@ -463,7 +467,7 @@ struct UptimeChipView: View {
         switch status {
         case .running:
             return .green
-        case .starting, .portBusy, .portMismatch, .noPort:
+        case .starting, .warmingUp, .responseDelayed, .portBusy, .portMismatch, .noPort:
             return .orange
         case .noResponse, .crashed:
             return .red
