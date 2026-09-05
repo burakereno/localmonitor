@@ -14,16 +14,23 @@ enum PortScannerError: LocalizedError {
 struct PortScanner {
     func scan() async throws -> [DiscoveredPort] {
         let result = try await Shell.run(
-            "/bin/zsh",
-            arguments: ["-lc", "/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null"]
+            "/usr/sbin/lsof",
+            arguments: ["-nP", "-iTCP", "-sTCP:LISTEN"]
         )
 
-        if result.status != 0, result.stdout.isEmpty {
+        return await enrich(try Self.ports(from: result))
+    }
+
+    static func ports(from result: ShellResult) throws -> [DiscoveredPort] {
+        // lsof also exits with 1 when its filters match no open sockets.
+        if result.status == 1, result.stdout.nilIfBlank == nil, result.stderr.nilIfBlank == nil {
+            return []
+        }
+        if result.status != 0, result.stdout.nilIfBlank == nil {
             throw PortScannerError.lsofFailed(result.stderr.nilIfBlank ?? "lsof exited with \(result.status)")
         }
 
-        let ports = Self.parseLsofOutput(result.stdout)
-        return await enrich(ports)
+        return parseLsofOutput(result.stdout)
     }
 
     static func parseLsofOutput(_ output: String) -> [DiscoveredPort] {
