@@ -76,6 +76,11 @@ struct StatusPanelView: View {
         }
         .frame(width: 420, height: 840)
         .preferredColorScheme(.dark)
+        .sheet(item: $model.pendingWorkspaceImport) { workspace in
+            WorkspaceImportView(workspace: workspace) { profiles in
+                Task { await model.addWorkspaceProfiles(profiles, rootURL: workspace.rootURL) }
+            }
+        }
         .onAppear {
             launchAtLogin.refresh()
         }
@@ -549,6 +554,12 @@ struct StatusPanelView: View {
                             openAfterStart: binding(
                                 get: { project.openAfterStart },
                                 set: { model.updateOpenAfterStart(for: project, enabled: $0) }
+                            ),
+                            launchSettings: ProjectLaunchSettingsView(
+                                project: project,
+                                onCommand: { model.updateCommandTemplate(for: project, command: $0) },
+                                onHostname: { model.updateHostname(for: project, hostname: $0) },
+                                onHealthPath: { model.updateHealthPath(for: project, healthPath: $0) }
                             )
                         ) {
                             model.revealProject(project)

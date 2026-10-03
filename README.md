@@ -30,6 +30,8 @@
 - **Project control** — start, stop, restart, and open local web projects from the menu bar
 - **Port awareness** — detects listening localhost ports and maps them back to project folders when possible
 - **Framework detection** — detects Next.js, Astro, Hono, Vite, and other common local web app setups
+- **Workspace apps** — detects runnable apps in npm workspace folders, lets you choose which to add, and saves a separate working folder and launch command for each app
+- **Local hostnames** — supports customer addresses such as `mirayoga.localhost`; browser links, copied URLs, and HTTP health checks use the saved hostname
 - **Stable project ports** — stores each project's preferred port and warns when a process starts elsewhere
 - **Online / offline grouping** — keeps running projects separated from stopped projects
 - **Optional HTTP health checks** — allows 30 seconds for initial preparation and requires three consecutive failed checks before showing No Response; disabling checks uses listening ports only
@@ -77,3 +79,11 @@ open ".build/Local Monitor.app"
 - **GitHub Releases** — in-app update checks and DMG distribution
 
 Release signing setup is documented in [docs/release-signing.md](docs/release-signing.md).
+
+## Workspace Projects
+
+Add the monorepo root containing `package.json` and its `workspaces` list. Local Monitor finds packages with a `dev` or `start` script and lets you select the apps to save. Each app runs its script directly in its own folder, so root npm wrappers cannot swallow port arguments. Ports declared in scripts and package managers declared at the workspace root are detected; hoisted `node_modules` are supported.
+
+For a project such as meetcase-sites, Mirayoga and theme-preview get separate Start/Stop controls on ports 3100 and 3101. A single literal local hostname in Next.js `allowedDevOrigins` is suggested automatically; multiple origins keep `localhost` as the default. In Settings → Projects → Launch Settings, edit the command, hostname, or health check path. `{port}` in the command follows the saved port. Settings are saved and reused on every Start.
+
+Saved workspace-root entries that still use a default launch command migrate to the app selected by the root workspace script when the new version opens. Existing custom commands, IDs, pins, and ports are retained. Re-add the workspace root to select any additional apps. Projects that need a separate API server still require that server to be running; dependency startup is a future addition.

@@ -14,7 +14,7 @@ struct PreflightChecker {
             issues.append(PreflightIssue(severity: .warning, message: "package.json missing"))
         }
 
-        if !fileManager.fileExists(atPath: project.folderURL.appendingPathComponent("node_modules").path),
+        if ProjectWorkspace.dependencyDirectory(in: project.folderURL) == nil,
            ![ProjectKind.supabase, .prisma].contains(project.kind) {
             issues.append(PreflightIssue(severity: .warning, message: "node_modules missing"))
         }

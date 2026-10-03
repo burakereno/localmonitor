@@ -205,6 +205,8 @@ struct LocalProject: Identifiable, Codable, Equatable {
     var port: Int
     var commandTemplate: String
     var healthPath: String
+    var hostname: String
+    var workspaceRootPath: String?
     var autoStart: Bool
     var autoRestart: Bool
     var openAfterStart: Bool
@@ -225,6 +227,8 @@ struct LocalProject: Identifiable, Codable, Equatable {
         port: Int,
         commandTemplate: String,
         healthPath: String = "/",
+        hostname: String = "localhost",
+        workspaceRootPath: String? = nil,
         autoStart: Bool = false,
         autoRestart: Bool = false,
         openAfterStart: Bool = true,
@@ -244,6 +248,8 @@ struct LocalProject: Identifiable, Codable, Equatable {
         self.port = port
         self.commandTemplate = commandTemplate
         self.healthPath = healthPath
+        self.hostname = LocalHostname.normalize(hostname) ?? "localhost"
+        self.workspaceRootPath = workspaceRootPath
         self.autoStart = autoStart
         self.autoRestart = autoRestart
         self.openAfterStart = openAfterStart
@@ -265,6 +271,8 @@ struct LocalProject: Identifiable, Codable, Equatable {
         case port
         case commandTemplate
         case healthPath
+        case hostname
+        case workspaceRootPath
         case autoStart
         case autoRestart
         case openAfterStart
@@ -287,6 +295,8 @@ struct LocalProject: Identifiable, Codable, Equatable {
         port = try container.decode(Int.self, forKey: .port)
         commandTemplate = try container.decode(String.self, forKey: .commandTemplate)
         healthPath = try container.decodeIfPresent(String.self, forKey: .healthPath) ?? "/"
+        hostname = LocalHostname.normalize(try container.decodeIfPresent(String.self, forKey: .hostname) ?? "localhost") ?? "localhost"
+        workspaceRootPath = try container.decodeIfPresent(String.self, forKey: .workspaceRootPath)
         autoStart = try container.decodeIfPresent(Bool.self, forKey: .autoStart) ?? false
         autoRestart = try container.decodeIfPresent(Bool.self, forKey: .autoRestart) ?? false
         openAfterStart = try container.decodeIfPresent(Bool.self, forKey: .openAfterStart) ?? true
@@ -303,12 +313,24 @@ struct LocalProject: Identifiable, Codable, Equatable {
     }
 
     var localURL: URL? {
-        URL(string: "http://localhost:\(port)")
+        localURL(port: port)
+    }
+
+    var localAuthority: String {
+        "\(hostname == "::1" ? "[::1]" : hostname):\(port)"
+    }
+
+    func localURL(port: Int) -> URL? {
+        URL(string: "http://\(hostname == "::1" ? "[::1]" : hostname):\(port)")
     }
 
     var healthURL: URL? {
         let cleanedPath = healthPath.hasPrefix("/") ? healthPath : "/\(healthPath)"
-        return URL(string: "http://localhost:\(port)\(cleanedPath)")
+        guard var components = localURL.flatMap({ URLComponents(url: $0, resolvingAgainstBaseURL: false) }) else { return nil }
+        guard let endpoint = URLComponents(string: cleanedPath), endpoint.host == nil else { return nil }
+        components.path = endpoint.path
+        components.query = endpoint.query
+        return components.url
     }
 
     var displayName: String {

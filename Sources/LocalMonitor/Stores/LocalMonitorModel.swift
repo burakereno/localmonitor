@@ -48,6 +48,7 @@ final class LocalMonitorModel: ObservableObject {
         displayMode: .count
     )
     @Published var selectedLogProjectID: UUID?
+    @Published var pendingWorkspaceImport: WorkspaceImport?
 
     private let store: ProjectStore
     private let portScanner: PortScanner
@@ -222,13 +223,24 @@ final class LocalMonitorModel: ObservableObject {
                 }
 
                 guard response == .OK, let selectedURL else { return }
-                await self.addProject(folderURL: selectedURL)
+                let profiles = ProjectDetector.launchProfiles(in: selectedURL)
+                if profiles.count > 1 {
+                    self.pendingWorkspaceImport = WorkspaceImport(rootURL: selectedURL, profiles: profiles)
+                } else {
+                    await self.addProject(folderURL: selectedURL)
+                }
             }
         }
     }
 
     func addProject(folderURL: URL) async {
+        let profiles = ProjectDetector.launchProfiles(in: folderURL)
+        if !profiles.isEmpty {
+            await addWorkspaceProfiles(profiles, rootURL: folderURL)
+            return
+        }
         let detection = ProjectDetector.detect(folderURL: folderURL, preferredPort: AppPreference.defaultPort)
+        guard !projects.contains(where: { $0.path == folderURL.path }) else { return }
         let port = nextAvailablePort(startingAt: detection.defaultPort)
         let project = LocalProject(
             name: detection.name,
@@ -239,12 +251,45 @@ final class LocalMonitorModel: ObservableObject {
             port: port,
             commandTemplate: detection.commandTemplate,
             healthPath: detection.suggestedPresets.first?.healthPath ?? "/",
+            hostname: detection.hostname,
             openAfterStart: AppPreference.openBrowserAfterStart
         )
 
         projects.append(project)
         runtimeStates[project.id] = .stopped
         healthStates[project.id] = .unknown
+        persist()
+        updateMenuBarTitle()
+        await refresh()
+    }
+
+    func addWorkspaceProfiles(_ profiles: [ProjectLaunchProfile], rootURL: URL) async {
+        let name = ProjectDetector.packageName(in: rootURL) ?? rootURL.lastPathComponent
+        let preferred = ProjectWorkspace.preferredProfile(in: rootURL, profiles: profiles)
+        let ordered = profiles.sorted {
+            if $0.id == preferred?.id, $1.id != preferred?.id { return true }
+            if $1.id == preferred?.id { return false }
+            return $0.relativePath < $1.relativePath
+        }
+        for profile in ordered where !projects.contains(where: { $0.path == profile.folderURL.path }) {
+            let detection = profile.detection
+            let project = LocalProject(
+                name: name,
+                profileName: profile.folderURL.lastPathComponent,
+                path: profile.folderURL.path,
+                kind: detection.kind,
+                packageManager: detection.packageManager,
+                port: importPort(for: profile.folderURL, preferredPort: detection.defaultPort),
+                commandTemplate: detection.commandTemplate,
+                hostname: detection.hostname,
+                workspaceRootPath: rootURL.path,
+                openAfterStart: AppPreference.openBrowserAfterStart
+            )
+            projects.append(project)
+            runtimeStates[project.id] = .stopped
+            healthStates[project.id] = .unknown
+        }
+        pendingWorkspaceImport = nil
         persist()
         updateMenuBarTitle()
         await refresh()
@@ -653,7 +698,7 @@ final class LocalMonitorModel: ObservableObject {
         recordProjectUse(project)
         guard
             let observedPort = runtimeState(for: project).observedPort,
-            let url = URL(string: "http://localhost:\(observedPort)")
+            let url = project.localURL(port: observedPort)
         else {
             openInBrowser(project, recordsUsage: false)
             return
@@ -663,13 +708,13 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func copyURL(_ project: LocalProject, network: Bool = false) {
-        let host = network ? localNetworkAddress() : "localhost"
-        copyToPasteboard("http://\(host):\(project.port)")
+        if network { copyToPasteboard("http://\(localNetworkAddress()):\(project.port)") }
+        else { copyToPasteboard(project.localURL?.absoluteString ?? "") }
     }
 
     func copyObservedURL(_ project: LocalProject) {
         let port = runtimeState(for: project).observedPort ?? project.port
-        copyToPasteboard("http://localhost:\(port)")
+        copyToPasteboard(project.localURL(port: port)?.absoluteString ?? "")
     }
 
     func copyURL(_ port: DiscoveredPort, network: Bool = false) {
@@ -725,6 +770,11 @@ final class LocalMonitorModel: ObservableObject {
         updateProject(project) { mutable in
             mutable.healthPath = healthPath.isEmpty ? "/" : healthPath
         }
+    }
+
+    func updateHostname(for project: LocalProject, hostname: String) {
+        guard let hostname = LocalHostname.normalize(hostname) else { return }
+        updateProject(project) { $0.hostname = hostname }
     }
 
     func updateAutoRestart(for project: LocalProject, enabled: Bool) {
@@ -1100,7 +1150,8 @@ final class LocalMonitorModel: ObservableObject {
         var didChange = false
 
         for index in projects.indices {
-            guard let detectedName = ProjectDetector.packageName(in: projects[index].folderURL) else {
+            let nameFolder = projects[index].workspaceRootPath.map { URL(fileURLWithPath: $0) } ?? projects[index].folderURL
+            guard let detectedName = ProjectDetector.packageName(in: nameFolder) else {
                 continue
             }
             guard projects[index].name != detectedName else { continue }
@@ -1385,9 +1436,12 @@ final class LocalMonitorModel: ObservableObject {
                 packageManager: project.packageManager
             )
 
-            guard commandTemplate != project.commandTemplate else { continue }
-            migrated.projects[index].commandTemplate = commandTemplate
-            migrated.projects[index].updatedAt = Date()
+            var normalized = project
+            if commandTemplate != project.commandTemplate {
+                normalized.commandTemplate = commandTemplate
+                normalized.updatedAt = Date()
+            }
+            migrated.projects[index] = ProjectLaunchMigration.migrate(normalized)
         }
 
         return migrated
@@ -1395,6 +1449,16 @@ final class LocalMonitorModel: ObservableObject {
 
     private func nextAvailablePort(startingAt preferredPort: Int) -> Int {
         nextAvailablePort(startingAt: preferredPort, excluding: nil)
+    }
+
+    private func importPort(for folder: URL, preferredPort: Int) -> Int {
+        let hasSavedOwner = projects.contains { $0.port == preferredPort }
+        let hasMatchingListener = discoveredPorts.contains { owner in
+            guard owner.port == preferredPort, let path = owner.workingDirectory else { return false }
+            return URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+                == folder.standardizedFileURL.resolvingSymlinksInPath()
+        }
+        return !hasSavedOwner && hasMatchingListener ? preferredPort : nextAvailablePort(startingAt: preferredPort)
     }
 
     private func nextAvailablePort(startingAt preferredPort: Int, excluding projectId: UUID?) -> Int {
@@ -1486,7 +1550,7 @@ final class LocalMonitorModel: ObservableObject {
                     state.status = .noPort
                     state.pid = nil
                     state.observedPort = nil
-                    state.lastMessage = "Waiting for localhost:\(project.port) to reopen."
+                    state.lastMessage = "Waiting for \(project.localAuthority) to reopen."
                     runtimeStates[project.id] = state
                 } else if state.status != .stopped || state.startedAt != nil || state.lastSeenRunningAt != nil {
                     state.status = .stopped
@@ -1531,7 +1595,7 @@ final class LocalMonitorModel: ObservableObject {
         state.pid = owner.pid
         state.observedPort = owner.port
         if state.status == .running {
-            state.lastMessage = "Listening on localhost:\(project.port)"
+            state.lastMessage = "Listening on \(project.localAuthority)"
         }
         runtimeStates[project.id] = state
         persistRuntimeSessions()
@@ -1712,7 +1776,7 @@ final class LocalMonitorModel: ObservableObject {
             state.readiness = ProjectReadinessState()
             if state.status == .warmingUp || state.status == .responseDelayed || state.status == .noResponse {
                 state.status = .running
-                state.lastMessage = "Listening on localhost:\(state.observedPort ?? project.port)"
+                state.lastMessage = "Listening on \(project.hostname):\(state.observedPort ?? project.port)"
             }
             runtimeStates[project.id] = state
         }
@@ -1761,7 +1825,7 @@ final class LocalMonitorModel: ObservableObject {
         state.status = status
         switch status {
         case .running:
-            state.lastMessage = "Listening on localhost:\(state.observedPort ?? project.port)"
+            state.lastMessage = "Listening on \(project.hostname):\(state.observedPort ?? project.port)"
         case .warmingUp:
             state.lastMessage = "Waiting for the first HTTP response."
         case .responseDelayed:
@@ -1785,7 +1849,7 @@ final class LocalMonitorModel: ObservableObject {
         switch next {
         case .healthy:
             if previous == nil || previous == .checking || previous == .unknown {
-                notificationService.notify(title: "\(project.displayName) is ready", body: "Listening on localhost:\(project.port)")
+                notificationService.notify(title: "\(project.displayName) is ready", body: "Listening on \(project.localAuthority)")
             }
         case .warning(let code, _):
             notificationService.notify(title: "\(project.displayName) health warning", body: "Health check returned \(code).")

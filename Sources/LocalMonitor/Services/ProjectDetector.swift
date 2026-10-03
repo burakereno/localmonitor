@@ -7,6 +7,7 @@ struct ProjectDetectionResult: Equatable {
     let defaultPort: Int
     let commandTemplate: String
     let suggestedPresets: [CommandPreset]
+    let hostname: String
 }
 
 enum ProjectDetector {
@@ -16,7 +17,8 @@ enum ProjectDetector {
         let dependencies = package?.allDependencies ?? []
         let packageManager = detectPackageManager(in: folderURL)
         let kind = detectKind(folderURL: folderURL, dependencies: dependencies)
-        let defaultPort = defaultPort(for: kind, folderURL: folderURL, preferredPort: preferredPort)
+        let defaultPort = scriptPort(package?.scripts["dev"] ?? package?.scripts["start"])
+            ?? defaultPort(for: kind, folderURL: folderURL, preferredPort: preferredPort)
         let commandTemplate = detectCommandTemplate(
             package: package,
             kind: kind,
@@ -35,8 +37,30 @@ enum ProjectDetector {
             packageManager: packageManager,
             defaultPort: defaultPort,
             commandTemplate: commandTemplate,
-            suggestedPresets: presets
+            suggestedPresets: presets,
+            hostname: LocalHostname.detect(in: folderURL)
         )
+    }
+
+    static func launchProfiles(in folder: URL, preferredPort: Int = AppPreference.defaultPort) -> [ProjectLaunchProfile] {
+        let root = folder.standardizedFileURL.resolvingSymlinksInPath()
+        return ProjectWorkspace.directories(in: root).compactMap { app in
+            let scripts = ProjectWorkspace.package(in: app)?["scripts"] as? [String: String] ?? [:]
+            guard scripts["dev"] != nil || scripts["start"] != nil else { return nil }
+            return ProjectLaunchProfile(
+                folderURL: app,
+                relativePath: String(app.path.dropFirst(root.path.count + 1)),
+                detection: detect(folderURL: app, preferredPort: preferredPort)
+            )
+        }
+    }
+
+    private static func scriptPort(_ script: String?) -> Int? {
+        guard let script,
+              let range = script.range(of: #"(?:--port(?:=|\s+)|-p\s+)[0-9]+"#, options: .regularExpression),
+              let digits = script[range].range(of: #"[0-9]+$"#, options: .regularExpression),
+              let port = Int(script[digits]), (1_024...65_535).contains(port) else { return nil }
+        return port
     }
 
     static func presets(for project: LocalProject) -> [CommandPreset] {
@@ -115,9 +139,12 @@ enum ProjectDetector {
     }
 
     private static func detectPackageManager(in folderURL: URL) -> PackageManager {
-        if fileExists("pnpm-lock.yaml", in: folderURL) { return .pnpm }
-        if fileExists("bun.lock", in: folderURL) || fileExists("bun.lockb", in: folderURL) { return .bun }
-        if fileExists("yarn.lock", in: folderURL) { return .yarn }
+        let root = ProjectWorkspace.root(containing: folderURL) ?? folderURL
+        let declared = ProjectWorkspace.package(in: root)?["packageManager"] as? String
+        if let manager = declared?.split(separator: "@").first.flatMap({ PackageManager(rawValue: String($0)) }) { return manager }
+        if fileExists("pnpm-lock.yaml", in: root) { return .pnpm }
+        if fileExists("bun.lock", in: root) || fileExists("bun.lockb", in: root) { return .bun }
+        if fileExists("yarn.lock", in: root) { return .yarn }
         return .npm
     }
 
@@ -152,6 +179,8 @@ enum ProjectDetector {
         switch kind {
         case .nextjs:
             let base = hasDev ? packageManager.devCommand : (hasStart ? packageManager.startCommand : packageManager.devCommand)
+            let script = hasDev ? package?.scripts["dev"] : package?.scripts["start"]
+            if let script, !script.contains("next dev"), !script.contains("next start") { return "PORT={port} \(base)" }
             return "\(base)\(packageManager.scriptArguments("-p {port}"))"
         case .hono:
             let base = hasDev ? packageManager.devCommand : (hasStart ? packageManager.startCommand : packageManager.devCommand)

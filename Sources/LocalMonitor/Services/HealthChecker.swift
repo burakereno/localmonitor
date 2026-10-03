@@ -6,14 +6,11 @@ protocol HealthChecking {
 
 struct HealthChecker: HealthChecking {
     func check(_ project: LocalProject) async -> HealthState {
-        guard let url = project.healthURL else {
+        guard let request = Self.request(for: project) else {
             return .unreachable("Invalid URL")
         }
 
         let start = Date()
-        var request = URLRequest(url: url, timeoutInterval: 5)
-        request.httpMethod = "HEAD"
-        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
 
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
@@ -30,5 +27,19 @@ struct HealthChecker: HealthChecking {
         } catch {
             return .unreachable(error.localizedDescription)
         }
+    }
+
+    static func request(for project: LocalProject) -> URLRequest? {
+        guard let url = project.healthURL else { return nil }
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        // macOS native DNS does not resolve every *.localhost name. Preserve the
+        // site's Host while connecting to loopback, just as local browsers do.
+        if project.hostname.hasSuffix(".localhost") { components?.host = "127.0.0.1" }
+        guard let endpoint = components?.url else { return nil }
+        var request = URLRequest(url: endpoint, timeoutInterval: 5)
+        request.httpMethod = "HEAD"
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        request.setValue(project.localAuthority, forHTTPHeaderField: "Host")
+        return request
     }
 }

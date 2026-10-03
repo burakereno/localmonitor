@@ -147,7 +147,9 @@ final class ProjectProcessManager {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-lc", "exec \(project.resolvedCommand)"]
+        // Keep the shell as the managed root so assignments and compound user
+        // commands work; Stop already terminates its complete descendant tree.
+        process.arguments = ["-lc", project.resolvedCommand]
         process.currentDirectoryURL = project.folderURL
         process.standardOutput = logHandle
         process.standardError = logHandle
@@ -345,7 +347,7 @@ final class ProjectProcessManager {
     }
 
     private func writeSessionMarker(project: LocalProject, to handle: FileHandle) {
-        let marker = "\n[Local Monitor] Starting \(project.displayName) on localhost:\(project.port)\n"
+        let marker = "\n[Local Monitor] Starting \(project.displayName) on \(project.localAuthority)\n"
         try? handle.write(contentsOf: Data(marker.utf8))
     }
 
