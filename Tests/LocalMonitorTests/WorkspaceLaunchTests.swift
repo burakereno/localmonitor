@@ -165,7 +165,7 @@ final class WorkspaceLaunchTests: XCTestCase {
         XCTAssertEqual(Set(model.projects.map(\.path)).count, 2)
         await model.addProject(folderURL: fixture.root)
         XCTAssertEqual(model.projects.count, 2)
-        XCTAssertEqual(store.load().projects, model.projects)
+        assertSavedLaunchProfiles(store.load().projects, match: model.projects)
     }
 
     @MainActor
@@ -181,7 +181,20 @@ final class WorkspaceLaunchTests: XCTestCase {
         let model = LocalMonitorModel(store: store, userDefaults: defaults)
         XCTAssertEqual(model.projects.first?.id, original.id)
         XCTAssertEqual(model.projects.first?.hostname, "mirayoga.localhost")
-        XCTAssertEqual(store.load().projects, model.projects)
+        assertSavedLaunchProfiles(store.load().projects, match: model.projects)
+    }
+
+    private func assertSavedLaunchProfiles(_ saved: [LocalProject], match projects: [LocalProject]) {
+        // The store's ISO-8601 format rounds timestamps to seconds. Compare the
+        // launch settings this regression protects without fractional dates.
+        XCTAssertEqual(saved.map(\.id), projects.map(\.id))
+        XCTAssertEqual(saved.map(\.name), projects.map(\.name))
+        XCTAssertEqual(saved.map(\.profileName), projects.map(\.profileName))
+        XCTAssertEqual(saved.map(\.path), projects.map(\.path))
+        XCTAssertEqual(saved.map(\.port), projects.map(\.port))
+        XCTAssertEqual(saved.map(\.commandTemplate), projects.map(\.commandTemplate))
+        XCTAssertEqual(saved.map(\.hostname), projects.map(\.hostname))
+        XCTAssertEqual(saved.map(\.workspaceRootPath), projects.map(\.workspaceRootPath))
     }
 
     @MainActor
