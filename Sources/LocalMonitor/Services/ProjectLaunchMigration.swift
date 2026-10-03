@@ -5,6 +5,7 @@ enum ProjectLaunchMigration {
     static func migrate(_ project: LocalProject) -> LocalProject {
         guard project.workspaceRootPath == nil else { return project }
         let profiles = ProjectDetector.launchProfiles(in: project.folderURL, preferredPort: project.port)
+        guard !profiles.contains(where: { $0.relativePath == "." }) else { return project }
         let manager = project.packageManager
         let defaults: Set<String> = [
             "\(manager.devCommand)\(manager.scriptArguments("-p {port}"))",
@@ -13,7 +14,7 @@ enum ProjectLaunchMigration {
             "PORT={port} \(manager.startCommand)"
         ]
         guard defaults.contains(project.commandTemplate),
-              let profile = ProjectWorkspace.preferredProfile(in: project.folderURL, profiles: profiles) else { return project }
+              let profile = ProjectWorkspace.preferredProfile(in: project.folderURL, profiles: profiles, requireSelector: true) else { return project }
         var migrated = project
         migrated.workspaceRootPath = project.path
         migrated.path = profile.folderURL.path

@@ -44,7 +44,7 @@ enum ProjectDetector {
 
     static func launchProfiles(in folder: URL, preferredPort: Int = AppPreference.defaultPort) -> [ProjectLaunchProfile] {
         let root = folder.standardizedFileURL.resolvingSymlinksInPath()
-        return ProjectWorkspace.directories(in: root).compactMap { app in
+        var profiles = ProjectWorkspace.directories(in: root).compactMap { app -> ProjectLaunchProfile? in
             let scripts = ProjectWorkspace.package(in: app)?["scripts"] as? [String: String] ?? [:]
             guard scripts["dev"] != nil || scripts["start"] != nil else { return nil }
             return ProjectLaunchProfile(
@@ -53,6 +53,14 @@ enum ProjectDetector {
                 detection: detect(folderURL: app, preferredPort: preferredPort)
             )
         }
+        let scripts = ProjectWorkspace.package(in: root)?["scripts"] as? [String: String] ?? [:]
+        let script = scripts["dev"] ?? scripts["start"] ?? ""
+        let directServer = #"^\s*(?:[A-Za-z_]\w*=(?:\"[^\"]*\"|'[^']*'|\S+)\s+)*(?:next\s+(?:dev|start)|vite|astro\s+(?:dev|preview)|nuxt\s+(?:dev|start)|remix\s+dev|svelte-kit\s+dev)(?:\s|$)"#
+        if !profiles.isEmpty, script.range(of: directServer, options: .regularExpression) != nil {
+            profiles.insert(ProjectLaunchProfile(folderURL: root, relativePath: ".",
+                                                 detection: detect(folderURL: root, preferredPort: preferredPort)), at: 0)
+        }
+        return profiles
     }
 
     private static func scriptPort(_ script: String?) -> Int? {

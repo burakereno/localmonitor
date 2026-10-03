@@ -280,7 +280,7 @@ final class LocalMonitorModel: ObservableObject {
             let detection = profile.detection
             let project = LocalProject(
                 name: name,
-                profileName: profile.folderURL.lastPathComponent,
+                profileName: profile.relativePath == "." ? primaryProfileName(for: detection.kind) : profile.folderURL.lastPathComponent,
                 path: profile.folderURL.path,
                 kind: detection.kind,
                 packageManager: detection.packageManager,

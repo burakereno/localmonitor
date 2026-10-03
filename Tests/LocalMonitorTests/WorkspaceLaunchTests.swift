@@ -56,6 +56,16 @@ final class WorkspaceLaunchTests: XCTestCase {
         XCTAssertEqual(ProjectLaunchMigration.migrate(original), original)
     }
 
+    func testRootApplicationIsRetainedAndNeverMigratesWithoutAnExplicitWorkspaceSelector() throws {
+        let fixture = try WorkspaceLaunchFixture()
+        defer { fixture.cleanup() }
+        try fixture.write("package.json", #"{"name":"root-site","workspaces":["apps/*"],"scripts":{"dev":"next dev"},"dependencies":{"next":"16.3.8"}}"#)
+        let profiles = ProjectDetector.launchProfiles(in: fixture.root)
+        XCTAssertEqual(profiles.map(\.relativePath), [".", "apps/mirayoga", "apps/theme-preview"])
+        let original = fixture.legacyProject()
+        XCTAssertEqual(ProjectLaunchMigration.migrate(original), original)
+    }
+
     func testBrowserAndHealthRequestUseSameTenantHostWithoutNativeDNS() throws {
         let fixture = try WorkspaceLaunchFixture()
         defer { fixture.cleanup() }

@@ -61,7 +61,7 @@ enum ProjectWorkspace {
         return FileManager.default.fileExists(atPath: hoisted.path) ? hoisted : nil
     }
 
-    static func preferredProfile(in root: URL, profiles: [ProjectLaunchProfile]) -> ProjectLaunchProfile? {
+    static func preferredProfile(in root: URL, profiles: [ProjectLaunchProfile], requireSelector: Bool = false) -> ProjectLaunchProfile? {
         let scripts = package(in: root)?["scripts"] as? [String: String] ?? [:]
         let command = scripts["dev"] ?? scripts["start"] ?? ""
         let pattern = #"(?:--workspace(?:=|\s+)|-w\s+)([\w@./-]+)"#
@@ -73,7 +73,7 @@ enum ProjectWorkspace {
                 $0.detection.name == selector || $0.relativePath == selector || "./" + $0.relativePath == selector
             }) { return selected }
         }
-        return profiles.first
+        return requireSelector ? nil : profiles.first
     }
 
     private static func matches(_ path: String, patterns: [String]) -> Bool {
