@@ -3,12 +3,13 @@ import SwiftUI
 struct WorkspaceImportView: View {
     let workspace: WorkspaceImport
     let onAdd: ([ProjectLaunchProfile]) -> Void
-    @Environment(\.dismiss) private var dismiss
+    let onCancel: () -> Void
     @State private var selectedIDs: Set<String>
 
-    init(workspace: WorkspaceImport, onAdd: @escaping ([ProjectLaunchProfile]) -> Void) {
+    init(workspace: WorkspaceImport, onAdd: @escaping ([ProjectLaunchProfile]) -> Void, onCancel: @escaping () -> Void) {
         self.workspace = workspace
         self.onAdd = onAdd
+        self.onCancel = onCancel
         _selectedIDs = State(initialValue: Set(workspace.profiles.map(\.id)))
     }
 
@@ -35,11 +36,10 @@ struct WorkspaceImportView: View {
             }
             HStack {
                 Spacer()
-                Button("Cancel") { dismiss() }
+                Button("Cancel", action: onCancel)
                     .keyboardShortcut(.cancelAction)
                 Button("Add Apps") {
                     onAdd(workspace.profiles.filter { selectedIDs.contains($0.id) })
-                    dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(selectedIDs.isEmpty)

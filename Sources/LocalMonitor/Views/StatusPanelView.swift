@@ -76,11 +76,6 @@ struct StatusPanelView: View {
         }
         .frame(width: 420, height: 840)
         .preferredColorScheme(.dark)
-        .sheet(item: $model.pendingWorkspaceImport) { workspace in
-            WorkspaceImportView(workspace: workspace) { profiles in
-                Task { await model.addWorkspaceProfiles(profiles, rootURL: workspace.rootURL) }
-            }
-        }
         .onAppear {
             launchAtLogin.refresh()
         }

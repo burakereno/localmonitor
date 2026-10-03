@@ -48,7 +48,6 @@ final class LocalMonitorModel: ObservableObject {
         displayMode: .count
     )
     @Published var selectedLogProjectID: UUID?
-    @Published var pendingWorkspaceImport: WorkspaceImport?
 
     private let store: ProjectStore
     private let portScanner: PortScanner
@@ -62,6 +61,7 @@ final class LocalMonitorModel: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     private var cacheSizeTask: Task<Void, Never>?
     private var projectPanel: NSOpenPanel?
+    private var workspaceImportController: WorkspaceImportWindowController?
     private var lastHealthStates: [UUID: HealthState] = [:]
     private var lastReadinessCheckDates: [UUID: Date] = [:]
     private var readinessCheckIDs: [UUID: UUID] = [:]
@@ -225,7 +225,12 @@ final class LocalMonitorModel: ObservableObject {
                 guard response == .OK, let selectedURL else { return }
                 let profiles = ProjectDetector.launchProfiles(in: selectedURL)
                 if profiles.count > 1 {
-                    self.pendingWorkspaceImport = WorkspaceImport(rootURL: selectedURL, profiles: profiles)
+                    self.workspaceImportController = WorkspaceImportWindowController(
+                        workspace: WorkspaceImport(rootURL: selectedURL, profiles: profiles)
+                    ) { [weak self] selected in
+                        Task { await self?.addWorkspaceProfiles(selected, rootURL: selectedURL) }
+                    }
+                    self.workspaceImportController?.present()
                 } else {
                     await self.addProject(folderURL: selectedURL)
                 }
@@ -289,7 +294,6 @@ final class LocalMonitorModel: ObservableObject {
             runtimeStates[project.id] = .stopped
             healthStates[project.id] = .unknown
         }
-        pendingWorkspaceImport = nil
         persist()
         updateMenuBarTitle()
         await refresh()
