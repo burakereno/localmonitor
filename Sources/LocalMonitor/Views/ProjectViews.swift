@@ -9,13 +9,16 @@ struct ProjectCardView: View {
     let conflict: DiscoveredPort?
     let cleanRestartState: CleanRestartState?
     let cacheState: ProjectCacheState?
+    let browserHostnames: [String]
     let onStart: () -> Void
     let onStop: () -> Void
     let onRestart: () -> Void
     let onCleanRestart: () -> Void
     let onOpen: () -> Void
+    let onOpenHostname: (String) -> Void
     let onCopyURL: () -> Void
     let onLogs: () -> Void
+    let onWorkspaceApps: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -72,7 +75,15 @@ struct ProjectCardView: View {
                 }
                 Spacer()
 
-                IconActionButton(systemName: "safari", help: "Open Localhost", action: onOpen)
+                if project.workspaceRootPath != nil {
+                    IconActionButton(systemName: "square.grid.2x2", help: "Workspace Apps", action: onWorkspaceApps)
+                }
+                ProjectBrowserButtonView(
+                    hostnames: browserHostnames,
+                    port: state.observedPort ?? project.port,
+                    onOpen: onOpen,
+                    onOpenHostname: onOpenHostname
+                )
                 IconActionButton(systemName: "link", help: "Copy Localhost URL", action: onCopyURL)
                 IconActionButton(systemName: "doc.text.magnifyingglass", help: "Show Logs", action: onLogs)
             }

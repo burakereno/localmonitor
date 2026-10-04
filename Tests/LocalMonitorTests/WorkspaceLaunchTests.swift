@@ -91,6 +91,126 @@ final class WorkspaceLaunchTests: XCTestCase {
         }
     }
 
+    func testBrowserHostsAreLocalUniqueAndDoNotChangeTheDefaultHost() throws {
+        let fixture = try WorkspaceLaunchFixture()
+        defer { fixture.cleanup() }
+        let app = fixture.root.appendingPathComponent("apps/theme-preview")
+        try fixture.write("apps/theme-preview/next.config.ts", #"export default { allowedDevOrigins: ['ritim.localhost', 'Luma.Localhost', 'luma.localhost', '*.localhost', 'example.com', 'bad..localhost'] }"#)
+        XCTAssertEqual(LocalHostname.detectedHosts(in: app), ["luma.localhost", "ritim.localhost"])
+        XCTAssertEqual(LocalHostname.detect(in: app), "localhost")
+        XCTAssertEqual(LocalHostname.detectedHosts(in: fixture.root.appendingPathComponent("apps/mirayoga")), ["mirayoga.localhost"])
+    }
+
+    func testWorkspaceSelectionExcludesSavedAppsAndRetainsTheirCustomSettings() throws {
+        let fixture = try WorkspaceLaunchFixture()
+        defer { fixture.cleanup() }
+        let profiles = ProjectDetector.launchProfiles(in: fixture.root)
+        var saved = ProjectLaunchMigration.migrate(fixture.legacyProject())
+        saved.port = 3300
+        saved.hostname = "custom.localhost"
+        saved.commandTemplate = "PORT={port} node launcher.mjs"
+        // A saved alias of the same folder must also count as already added.
+        let alias = fixture.root.appendingPathComponent("saved-mirayoga")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: saved.folderURL)
+        saved.path = alias.path
+        let workspace = WorkspaceImport(rootURL: fixture.root, profiles: profiles, savedProjects: [saved])
+        XCTAssertEqual(workspace.availableProfiles.map(\.relativePath), ["apps/theme-preview"])
+        let existing = try XCTUnwrap(workspace.savedProject(for: profiles[0]))
+        XCTAssertEqual(existing.port, 3300)
+        XCTAssertEqual(existing.hostname, "custom.localhost")
+        XCTAssertEqual(existing.commandTemplate, "PORT={port} node launcher.mjs")
+    }
+
+    @MainActor
+    func testBrowserShortcutsUseTheProfilePortAndPreserveItsDefaultHostname() throws {
+        let fixture = try WorkspaceLaunchFixture()
+        defer { fixture.cleanup() }
+        var project = fixture.legacyProject()
+        project.path = fixture.root.appendingPathComponent("apps/theme-preview").path
+        project.hostname = "catalog.localhost"
+        project.port = 3201
+        let suite = "WorkspaceBrowserTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ProjectStore(storageDirectoryURL: fixture.root.appendingPathComponent("store"))
+        store.save(ProjectLibrary(projects: [project]))
+        let model = LocalMonitorModel(store: store, userDefaults: defaults)
+        XCTAssertEqual(model.browserHostnames(for: project), ["catalog.localhost", "luma.localhost", "ritim.localhost"])
+        XCTAssertEqual(model.browserURL(for: project, hostname: "luma.localhost")?.absoluteString, "http://luma.localhost:3201")
+        XCTAssertNil(model.browserURL(for: project, hostname: "example.com"))
+        XCTAssertNil(model.browserURL(for: project, hostname: "unknown.localhost"))
+        XCTAssertEqual(model.projects.first?.hostname, "catalog.localhost")
+    }
+
+    @MainActor
+    func testAddingAnAlreadyRunningSiblingKeepsItsPortAndProcessWithoutChangingTheSavedApp() async throws {
+        let fixture = try WorkspaceLaunchFixture()
+        defer { fixture.cleanup() }
+        let app = fixture.root.appendingPathComponent("apps/theme-preview")
+        let external = Process()
+        external.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        external.currentDirectoryURL = app
+        external.arguments = ["-u", "-c", """
+        import socket, time
+        from pathlib import Path
+        listener = socket.socket()
+        listener.bind(('127.0.0.1', 0))
+        listener.listen()
+        Path('listener-port').write_text(str(listener.getsockname()[1]))
+        time.sleep(60)
+        """]
+        external.standardOutput = Pipe()
+        external.standardError = Pipe()
+        try external.run()
+        defer {
+            if external.isRunning { external.terminate() }
+            external.waitUntilExit()
+        }
+        let originalPID = external.processIdentifier
+        let deadline = Date().addingTimeInterval(5)
+        var port: Int?
+        while port == nil, Date() < deadline, external.isRunning {
+            port = (try? String(contentsOf: app.appendingPathComponent("listener-port"), encoding: .utf8)).flatMap { Int($0) }
+            if port == nil { try await Task.sleep(nanoseconds: 50_000_000) }
+        }
+        let runningPort = try XCTUnwrap(port)
+        try fixture.write("apps/theme-preview/package.json", """
+        {"name":"@meetcase-site/theme-preview","scripts":{"dev":"next dev --port \(runningPort)"},"dependencies":{"next":"16.3.8"}}
+        """)
+        let savedScanning = UserDefaults.standard.object(forKey: AppPreference.scanExternalPortsKey)
+        UserDefaults.standard.set(true, forKey: AppPreference.scanExternalPortsKey)
+        defer {
+            if let savedScanning { UserDefaults.standard.set(savedScanning, forKey: AppPreference.scanExternalPortsKey) }
+            else { UserDefaults.standard.removeObject(forKey: AppPreference.scanExternalPortsKey) }
+        }
+        var mira = ProjectLaunchMigration.migrate(fixture.legacyProject())
+        mira.port = 3300
+        mira.commandTemplate = "PORT={port} node custom.mjs"
+        let suite = "WorkspaceLiveImportTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ProjectStore(storageDirectoryURL: fixture.root.appendingPathComponent("store"))
+        store.save(ProjectLibrary(projects: [mira]))
+        let model = LocalMonitorModel(store: store, healthChecksEnabled: false,
+                                      notificationService: NotificationService(isEnabled: { false }), userDefaults: defaults)
+        let savedMira = try XCTUnwrap(model.projects.first)
+        // No refresh before import: the import itself must discover the listener.
+        let profiles = ProjectDetector.launchProfiles(in: fixture.root)
+        await model.addWorkspaceProfiles(profiles, rootURL: fixture.root)
+        let theme = try XCTUnwrap(model.projects.first { $0.profileName == "theme-preview" })
+        XCTAssertEqual(theme.port, runningPort)
+        XCTAssertEqual(model.runtimeState(for: theme).pid, originalPID)
+        XCTAssertEqual(model.runtimeState(for: theme).ownership, .external)
+        XCTAssertEqual(model.projects.first { $0.id == mira.id }, savedMira)
+        await model.startProject(theme, recordsUsage: false)
+        XCTAssertTrue(external.isRunning)
+        XCTAssertEqual(model.runtimeState(for: theme).pid, originalPID)
+        await model.addWorkspaceProfiles(profiles, rootURL: fixture.root)
+        XCTAssertEqual(model.projects.count, 2)
+        XCTAssertTrue(external.isRunning)
+        XCTAssertEqual(model.browserURL(for: theme, hostname: "luma.localhost")?.port, runningPort)
+    }
+
     @MainActor
     func testRealHealthCheckSendsTheCustomerHostToLoopbackServer() async throws {
         let fixture = try WorkspaceLaunchFixture()

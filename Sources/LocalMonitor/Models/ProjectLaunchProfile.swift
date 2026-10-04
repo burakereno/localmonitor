@@ -11,6 +11,16 @@ struct WorkspaceImport: Identifiable {
     var id: String { rootURL.path }
     let rootURL: URL
     let profiles: [ProjectLaunchProfile]
+    var savedProjects: [LocalProject] = []
+
+    var availableProfiles: [ProjectLaunchProfile] {
+        profiles.filter { savedProject(for: $0) == nil }
+    }
+
+    func savedProject(for profile: ProjectLaunchProfile) -> LocalProject? {
+        let folder = profile.folderURL.standardizedFileURL.resolvingSymlinksInPath()
+        return savedProjects.first { $0.folderURL.standardizedFileURL.resolvingSymlinksInPath() == folder }
+    }
 }
 
 enum LocalHostname {
@@ -28,6 +38,12 @@ enum LocalHostname {
     }
 
     static func detect(in folder: URL) -> String {
+        let hosts = detectedHosts(in: folder)
+        // Multiple allowed origins do not identify a single default site.
+        return hosts.count == 1 ? hosts[0] : "localhost"
+    }
+
+    static func detectedHosts(in folder: URL) -> [String] {
         for file in ["next.config.ts", "next.config.mjs", "next.config.js"] {
             guard let config = try? String(contentsOf: folder.appendingPathComponent(file), encoding: .utf8),
                   let origins = config.range(of: #"allowedDevOrigins\s*:\s*\[[^\]]*\]"#, options: .regularExpression),
@@ -37,9 +53,8 @@ enum LocalHostname {
                 guard let range = Range(match.range(at: 1), in: value) else { return nil }
                 return normalize(String(value[range]))
             }
-            // Multiple allowed origins do not identify a single default site.
-            if Set(hosts).count == 1, let host = hosts.first { return host }
+            return Array(Set(hosts)).sorted()
         }
-        return "localhost"
+        return []
     }
 }

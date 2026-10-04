@@ -30,7 +30,7 @@
 - **Project control** — start, stop, restart, and open local web projects from the menu bar
 - **Port awareness** — detects listening localhost ports and maps them back to project folders when possible
 - **Framework detection** — detects Next.js, Astro, Hono, Vite, and other common local web app setups
-- **Workspace apps** — detects runnable apps in npm workspace folders, lets you choose which to add, and saves a separate working folder and launch command for each app
+- **Workspace apps** — detects runnable apps in npm workspace folders, lets you add other apps from a saved project's Workspace Apps button, and saves a separate working folder and launch command for each app
 - **Local hostnames** — supports customer addresses such as `mirayoga.localhost`; browser links, copied URLs, and HTTP health checks use the saved hostname
 - **Stable project ports** — stores each project's preferred port and warns when a process starts elsewhere
 - **Online / offline grouping** — keeps running projects separated from stopped projects
@@ -86,4 +86,8 @@ Add the monorepo root containing `package.json` and its `workspaces` list. Local
 
 For a project such as meetcase-sites, Mirayoga and theme-preview get separate Start/Stop controls on ports 3100 and 3101. A single literal local hostname in Next.js `allowedDevOrigins` is suggested automatically; multiple origins keep `localhost` as the default. In Settings → Projects → Launch Settings, edit the command, hostname, or health check path. `{port}` in the command follows the saved port. Settings are saved and reused on every Start.
 
-Saved workspace-root entries that still use a default launch command migrate to the app selected by the root workspace script when the new version opens. Existing custom commands, IDs, pins, and ports are retained. Re-add the workspace root to select any additional apps. Projects that need a separate API server still require that server to be running; dependency startup is a future addition.
+Use the grid-shaped **Workspace Apps** button on a project card or in Settings → Projects to add sibling apps. Already added apps show their saved hostname and port and cannot be added again; adding apps preserves their current settings and does not start, stop, or restart servers. Local Monitor checks current listeners during import and retains an app's declared port when that app is already running there.
+
+For apps with several literal local addresses in `allowedDevOrigins`, the browser button offers the saved address plus each detected local hostname, all on the same running port. For example, theme-preview's catalogue and `luma.localhost` / `ritim.localhost` previews share one server and one Start/Stop profile. Wildcards and external origins are excluded. These addresses are browser shortcuts; the saved hostname still controls health checks and the default URL.
+
+Saved workspace-root entries that still use a default launch command migrate to the app selected by the root workspace script when the new version opens. Existing custom commands, IDs, pins, and ports are retained. Projects that need a separate API server still require that server to be running; dependency startup is a future addition.

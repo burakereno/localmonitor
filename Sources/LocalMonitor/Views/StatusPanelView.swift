@@ -210,7 +210,8 @@ struct StatusPanelView: View {
                 preflight: model.preflightResults[project.id],
                 conflict: model.conflictOwner(for: project),
                 cleanRestartState: model.cleanRestartStates[project.id],
-                cacheState: model.cacheStates[project.id]
+                cacheState: model.cacheStates[project.id],
+                browserHostnames: model.browserHostnames(for: project)
             ) {
                 Task { await model.startProject(project) }
             } onStop: {
@@ -221,10 +222,14 @@ struct StatusPanelView: View {
                 Task { await model.cleanRestartProject(project) }
             } onOpen: {
                 model.openObservedPort(project)
+            } onOpenHostname: { hostname in
+                model.openBrowserHostname(project, hostname: hostname)
             } onCopyURL: {
                 model.copyObservedURL(project)
             } onLogs: {
                 model.selectedLogProjectID = project.id
+            } onWorkspaceApps: {
+                model.showWorkspaceApps(for: project)
             }
             .transition(.opacity.combined(with: .scale(scale: 0.985)))
         }
@@ -560,6 +565,8 @@ struct StatusPanelView: View {
                             model.revealProject(project)
                         } onRemove: {
                             model.removeProject(project)
+                        } onWorkspaceApps: {
+                            model.showWorkspaceApps(for: project)
                         }
                         .padding(12)
                         .localCardBackground()

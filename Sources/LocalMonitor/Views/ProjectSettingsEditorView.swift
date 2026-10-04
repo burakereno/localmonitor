@@ -8,6 +8,7 @@ struct ProjectSettingsEditorView: View {
     let launchSettings: ProjectLaunchSettingsView
     let onReveal: () -> Void
     let onRemove: () -> Void
+    let onWorkspaceApps: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -29,6 +30,9 @@ struct ProjectSettingsEditorView: View {
 
                 Spacer()
 
+                if project.workspaceRootPath != nil {
+                    IconActionButton(systemName: "square.grid.2x2", help: "Workspace Apps", action: onWorkspaceApps)
+                }
                 IconActionButton(systemName: "folder", help: "Reveal Folder", action: onReveal)
                 IconActionButton(systemName: "trash", help: "Remove Project", tint: .red, action: onRemove)
             }
@@ -58,4 +62,3 @@ struct ProjectSettingsEditorView: View {
         .padding(.vertical, 5)
     }
 }
-

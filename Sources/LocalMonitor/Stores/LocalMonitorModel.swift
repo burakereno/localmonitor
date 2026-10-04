@@ -30,6 +30,7 @@ final class LocalMonitorModel: ObservableObject {
     @Published private(set) var groups: [WorkspaceGroup]
     @Published private(set) var runtimeStates: [UUID: ProjectRuntimeState] = [:]
     @Published private(set) var projectIdentities: [UUID: ProjectIdentity] = [:]
+    @Published private(set) var projectBrowserHostnames: [UUID: [String]] = [:]
     @Published private(set) var healthStates: [UUID: HealthState] = [:]
     @Published private(set) var preflightResults: [UUID: PreflightResult] = [:]
     @Published private(set) var discoveredPorts: [DiscoveredPort] = []
@@ -121,6 +122,7 @@ final class LocalMonitorModel: ObservableObject {
         }
 
         updateMenuBarTitle()
+        refreshBrowserHostnames()
     }
 
     func start() {
@@ -155,6 +157,7 @@ final class LocalMonitorModel: ObservableObject {
         defer { isRefreshing = false }
 
         refreshProjectNames()
+        refreshBrowserHostnames()
         ProjectIconCache.shared.refreshFavicons(for: projects)
         processManager.reconcile(projects: projects)
 
@@ -225,17 +228,27 @@ final class LocalMonitorModel: ObservableObject {
                 guard response == .OK, let selectedURL else { return }
                 let profiles = ProjectDetector.launchProfiles(in: selectedURL)
                 if profiles.count > 1 {
-                    self.workspaceImportController = WorkspaceImportWindowController(
-                        workspace: WorkspaceImport(rootURL: selectedURL, profiles: profiles)
-                    ) { [weak self] selected in
-                        Task { await self?.addWorkspaceProfiles(selected, rootURL: selectedURL) }
-                    }
-                    self.workspaceImportController?.present()
+                    self.presentWorkspaceApps(rootURL: selectedURL, profiles: profiles)
                 } else {
                     await self.addProject(folderURL: selectedURL)
                 }
             }
         }
+    }
+
+    func showWorkspaceApps(for project: LocalProject) {
+        guard let rootPath = project.workspaceRootPath else { return }
+        let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true)
+        presentWorkspaceApps(rootURL: rootURL, profiles: ProjectDetector.launchProfiles(in: rootURL))
+    }
+
+    private func presentWorkspaceApps(rootURL: URL, profiles: [ProjectLaunchProfile]) {
+        workspaceImportController = WorkspaceImportWindowController(
+            workspace: WorkspaceImport(rootURL: rootURL, profiles: profiles, savedProjects: projects)
+        ) { [weak self] selected in
+            Task { await self?.addWorkspaceProfiles(selected, rootURL: rootURL) }
+        }
+        workspaceImportController?.present()
     }
 
     func addProject(folderURL: URL) async {
@@ -269,6 +282,9 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func addWorkspaceProfiles(_ profiles: [ProjectLaunchProfile], rootURL: URL) async {
+        // Import can happen before the next periodic refresh. Read listeners now
+        // so an already running app retains its port without restarting it.
+        let listeners = (try? await portScanner.scan()) ?? discoveredPorts
         let name = ProjectDetector.packageName(in: rootURL) ?? rootURL.lastPathComponent
         let preferred = ProjectWorkspace.preferredProfile(in: rootURL, profiles: profiles)
         let ordered = profiles.sorted {
@@ -276,7 +292,10 @@ final class LocalMonitorModel: ObservableObject {
             if $1.id == preferred?.id { return false }
             return $0.relativePath < $1.relativePath
         }
-        for profile in ordered where !projects.contains(where: { $0.path == profile.folderURL.path }) {
+        for profile in ordered where !projects.contains(where: {
+            $0.folderURL.standardizedFileURL.resolvingSymlinksInPath()
+                == profile.folderURL.standardizedFileURL.resolvingSymlinksInPath()
+        }) {
             let detection = profile.detection
             let project = LocalProject(
                 name: name,
@@ -284,7 +303,7 @@ final class LocalMonitorModel: ObservableObject {
                 path: profile.folderURL.path,
                 kind: detection.kind,
                 packageManager: detection.packageManager,
-                port: importPort(for: profile.folderURL, preferredPort: detection.defaultPort),
+                port: importPort(for: profile.folderURL, preferredPort: detection.defaultPort, listeners: listeners),
                 commandTemplate: detection.commandTemplate,
                 hostname: detection.hostname,
                 workspaceRootPath: rootURL.path,
@@ -308,6 +327,7 @@ final class LocalMonitorModel: ObservableObject {
         }
         runtimeStates.removeValue(forKey: project.id)
         projectIdentities.removeValue(forKey: project.id)
+        projectBrowserHostnames.removeValue(forKey: project.id)
         healthStates.removeValue(forKey: project.id)
         lastHealthStates.removeValue(forKey: project.id)
         invalidateReadinessCheck(for: project.id)
@@ -684,6 +704,24 @@ final class LocalMonitorModel: ObservableObject {
             recordProjectUse(project)
         }
         guard let url = project.localURL else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    func browserHostnames(for project: LocalProject) -> [String] {
+        let defaultHost = LocalHostname.normalize(project.hostname) ?? "localhost"
+        return [defaultHost] + (projectBrowserHostnames[project.id] ?? []).filter { $0 != defaultHost }
+    }
+
+    func browserURL(for project: LocalProject, hostname: String) -> URL? {
+        guard let host = LocalHostname.normalize(hostname), browserHostnames(for: project).contains(host) else { return nil }
+        var destination = project
+        destination.hostname = host
+        return destination.localURL(port: runtimeState(for: project).observedPort ?? project.port)
+    }
+
+    func openBrowserHostname(_ project: LocalProject, hostname: String) {
+        guard let url = browserURL(for: project, hostname: hostname) else { return }
+        recordProjectUse(project)
         NSWorkspace.shared.open(url)
     }
 
@@ -1170,6 +1208,13 @@ final class LocalMonitorModel: ObservableObject {
         }
     }
 
+    private func refreshBrowserHostnames() {
+        let hosts = Dictionary(uniqueKeysWithValues: projects.map {
+            ($0.id, LocalHostname.detectedHosts(in: $0.folderURL))
+        })
+        if hosts != projectBrowserHostnames { projectBrowserHostnames = hosts }
+    }
+
     private func refreshAfterProcessStop() async {
         while isRefreshing {
             try? await Task.sleep(nanoseconds: 50_000_000)
@@ -1455,21 +1500,23 @@ final class LocalMonitorModel: ObservableObject {
         nextAvailablePort(startingAt: preferredPort, excluding: nil)
     }
 
-    private func importPort(for folder: URL, preferredPort: Int) -> Int {
+    private func importPort(for folder: URL, preferredPort: Int, listeners: [DiscoveredPort]) -> Int {
         let hasSavedOwner = projects.contains { $0.port == preferredPort }
-        let hasMatchingListener = discoveredPorts.contains { owner in
+        let hasMatchingListener = listeners.contains { owner in
             guard owner.port == preferredPort, let path = owner.workingDirectory else { return false }
             return URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
                 == folder.standardizedFileURL.resolvingSymlinksInPath()
         }
-        return !hasSavedOwner && hasMatchingListener ? preferredPort : nextAvailablePort(startingAt: preferredPort)
+        return !hasSavedOwner && hasMatchingListener ? preferredPort : nextAvailablePort(
+            startingAt: preferredPort, excluding: nil, occupiedPorts: Set(listeners.map(\.port))
+        )
     }
 
-    private func nextAvailablePort(startingAt preferredPort: Int, excluding projectId: UUID?) -> Int {
+    private func nextAvailablePort(startingAt preferredPort: Int, excluding projectId: UUID?, occupiedPorts: Set<Int>? = nil) -> Int {
         let projectPorts = projects
             .filter { $0.id != projectId }
             .map(\.port)
-        let usedPorts = Set(discoveredPorts.map(\.port)).union(projectPorts)
+        let usedPorts = (occupiedPorts ?? Set(discoveredPorts.map(\.port))).union(projectPorts)
         var candidate = min(65_535, max(1_024, preferredPort))
         while usedPorts.contains(candidate), candidate < 65_535 {
             candidate += 1
