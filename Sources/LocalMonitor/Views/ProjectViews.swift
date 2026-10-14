@@ -826,9 +826,19 @@ final class ProjectIconCache: ObservableObject {
 
     private var faviconCache: [String: FaviconCacheEntry] = [:]
     private var frameworkLogoCache: [String: NSImage] = [:]
+    private let faviconLoader: ProjectFaviconLoader
+    private var siteFavicons: [String: NSImage] = [:]
+    private var siteURLs: [String: URL] = [:]
+    private var siteRefreshDates: [String: Date] = [:]
+    private var siteRefreshTasks: [String: Task<Void, Never>] = [:]
+
+    init(faviconLoader: ProjectFaviconLoader = ProjectFaviconLoader()) {
+        self.faviconLoader = faviconLoader
+    }
 
     func favicon(for project: LocalProject) -> NSImage? {
         let key = project.path
+        if let image = siteFavicons[key] { return image }
         if let cached = faviconCache[key] {
             return cached.image
         }
@@ -845,6 +855,7 @@ final class ProjectIconCache: ObservableObject {
     func refreshFavicons(for projects: [LocalProject]) {
         let projectPaths = Set(projects.map(\.path))
         faviconCache = faviconCache.filter { projectPaths.contains($0.key) }
+        siteFavicons = siteFavicons.filter { projectPaths.contains($0.key) }
 
         var didChange = false
 
@@ -865,13 +876,46 @@ final class ProjectIconCache: ObservableObject {
                 didChange = true
             } else if snapshot.files.isEmpty {
                 faviconCache[key] = FaviconCacheEntry(snapshot: snapshot, image: nil)
-                didChange = cached.image != nil
+                didChange = didChange || cached.image != nil
             }
         }
 
         if didChange {
             faviconRevision &+= 1
         }
+    }
+
+    @discardableResult
+    func refreshSiteFavicons(for projects: [LocalProject], at now: Date = Date()) -> [Task<Void, Never>] {
+        var activeURLs: [String: URL] = [:]
+        for project in projects where activeURLs[project.path] == nil {
+            activeURLs[project.path] = project.localURL
+        }
+        for (path, task) in siteRefreshTasks where siteURLs[path] != activeURLs[path] {
+            task.cancel()
+            siteRefreshTasks.removeValue(forKey: path)
+        }
+        siteRefreshDates = siteRefreshDates.filter { siteURLs[$0.key] == activeURLs[$0.key] && activeURLs[$0.key] != nil }
+        siteURLs = activeURLs
+
+        for project in projects {
+            let key = project.path
+            guard let siteURL = activeURLs[key], siteRefreshTasks[key] == nil,
+                  siteRefreshDates[key].map({ now.timeIntervalSince($0) >= 60 }) ?? true else { continue }
+            siteRefreshDates[key] = now
+            siteRefreshTasks[key] = Task { [weak self, faviconLoader] in
+                let image = await faviconLoader.load(for: project)
+                guard let self, !Task.isCancelled, self.siteURLs[key] == siteURL else { return }
+                self.siteRefreshTasks.removeValue(forKey: key)
+                // Keep the last usable icon when a dev server is temporarily unavailable.
+                guard let image else { return }
+                if self.siteFavicons[key]?.tiffRepresentation != image.tiffRepresentation {
+                    self.siteFavicons[key] = image
+                    self.faviconRevision &+= 1
+                }
+            }
+        }
+        return Array(siteRefreshTasks.values)
     }
 
     func hasFavicon(for project: LocalProject) -> Bool {

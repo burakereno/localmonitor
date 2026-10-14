@@ -165,6 +165,12 @@ final class LocalMonitorModel: ObservableObject {
             let scanned = AppPreference.scanExternalPorts ? try await portScanner.scan() : []
             discoveredPorts = applyPortPreferences(to: annotate(scanned))
             reconcileRunningStates()
+            let faviconProjects = projects.filter { isProjectOnlineForGrouping($0) }.map { project in
+                var destination = project
+                destination.port = runtimeState(for: project).observedPort ?? project.port
+                return destination
+            }
+            ProjectIconCache.shared.refreshSiteFavicons(for: faviconProjects)
             await refreshProjectIdentities()
             await refreshReadinessStates()
             if !healthChecksEnabled {
