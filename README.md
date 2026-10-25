@@ -30,7 +30,7 @@
 - **Project control** — start, stop, restart, and open local web projects from the menu bar
 - **Port awareness** — detects listening localhost ports and maps them back to project folders when possible
 - **Framework detection** — detects Next.js, Astro, Hono, Vite, and other common local web app setups
-- **Project icons** — reads favicon links declared by running sites, including nested and external icon URLs, with local favicon files as a fallback
+- **Project icons** — reads favicon links declared by running sites and local HTML/Astro layouts, including nested icon paths; downloaded icons are cached on disk so they remain available after restarting Local Monitor with the site offline
 - **Workspace apps** — detects runnable apps in npm workspace folders, lets you add other apps from a saved project's Workspace Apps button, and saves a separate working folder and launch command for each app
 - **Local hostnames** — supports customer addresses such as `mirayoga.localhost`; browser links, copied URLs, and HTTP health checks use the saved hostname
 - **Stable project ports** — stores each project's preferred port and warns when a process starts elsewhere

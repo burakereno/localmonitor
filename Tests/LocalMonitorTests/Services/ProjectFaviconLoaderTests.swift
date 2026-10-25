@@ -155,7 +155,7 @@ struct ProjectFaviconLoaderTests {
             let url = try #require(request.url)
             let data = url.path == "" ? Data(#"<link rel="icon" href="/brand.png">"#.utf8) : png
             return (data, try httpResponse(url: url))
-        })
+        }, storageDirectoryURL: root.appendingPathComponent("cache"))
         let fallback = try #require(cache.favicon(for: project)?.tiffRepresentation)
         let now = Date()
         for task in cache.refreshSiteFavicons(for: [project], at: now) { await task.value }

@@ -827,13 +827,16 @@ final class ProjectIconCache: ObservableObject {
     private var faviconCache: [String: FaviconCacheEntry] = [:]
     private var frameworkLogoCache: [String: NSImage] = [:]
     private let faviconLoader: ProjectFaviconLoader
+    private let faviconStore: ProjectFaviconStore
+    private let localFaviconResolver = ProjectLocalFaviconResolver()
     private var siteFavicons: [String: NSImage] = [:]
     private var siteURLs: [String: URL] = [:]
     private var siteRefreshDates: [String: Date] = [:]
     private var siteRefreshTasks: [String: Task<Void, Never>] = [:]
 
-    init(faviconLoader: ProjectFaviconLoader = ProjectFaviconLoader()) {
+    init(faviconLoader: ProjectFaviconLoader = ProjectFaviconLoader(), storageDirectoryURL: URL? = nil) {
         self.faviconLoader = faviconLoader
+        self.faviconStore = ProjectFaviconStore(directoryURL: storageDirectoryURL)
     }
 
     func favicon(for project: LocalProject) -> NSImage? {
@@ -847,7 +850,7 @@ final class ProjectIconCache: ObservableObject {
         let image = snapshot.files
             .lazy
             .compactMap { self.loadFavicon(from: $0.url) }
-            .first
+            .first ?? faviconStore.image(for: key)
         faviconCache[key] = FaviconCacheEntry(snapshot: snapshot, image: image)
         return image
     }
@@ -856,6 +859,7 @@ final class ProjectIconCache: ObservableObject {
         let projectPaths = Set(projects.map(\.path))
         faviconCache = faviconCache.filter { projectPaths.contains($0.key) }
         siteFavicons = siteFavicons.filter { projectPaths.contains($0.key) }
+        faviconStore.retainImages(for: projectPaths)
 
         var didChange = false
 
@@ -869,7 +873,7 @@ final class ProjectIconCache: ObservableObject {
             let refreshedImage = snapshot.files
                 .lazy
                 .compactMap { self.loadFavicon(from: $0.url) }
-                .first
+                .first ?? faviconStore.image(for: key)
 
             if let refreshedImage {
                 faviconCache[key] = FaviconCacheEntry(snapshot: snapshot, image: refreshedImage)
@@ -911,6 +915,7 @@ final class ProjectIconCache: ObservableObject {
                 guard let image else { return }
                 if self.siteFavicons[key]?.tiffRepresentation != image.tiffRepresentation {
                     self.siteFavicons[key] = image
+                    self.faviconStore.save(image, for: key)
                     self.faviconRevision &+= 1
                 }
             }
@@ -991,7 +996,9 @@ final class ProjectIconCache: ObservableObject {
             .map { root.appendingPathComponent($0) }
             .filter { FileManager.default.fileExists(atPath: $0.path) }
 
-        return exactURLs + discoveredFaviconURLs(in: root)
+        var seen = Set<URL>()
+        return (localFaviconResolver.iconURLs(for: project) + exactURLs + discoveredFaviconURLs(in: root))
+            .filter { seen.insert($0).inserted }
     }
 
     private func discoveredFaviconURLs(in root: URL) -> [URL] {
