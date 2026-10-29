@@ -57,15 +57,18 @@ struct ProjectEnvironmentTests {
         #expect(try ProjectEnvironmentChecker().issues(for: project, shellPresence: ["DATABASE_URL": false]).isEmpty == false)
     }
 
-    @Test func exampleKeysWarnButExplicitKeysBlockWithoutLeakingValues() throws {
+    @Test func exampleKeysAreInformationalButExplicitKeysBlockWithoutLeakingValues() throws {
         let fixture = try ReliabilityFixture(); defer { fixture.cleanup() }
         try fixture.write(".env.example", "API_KEY=do-not-copy-value\nOPTIONAL=\n")
         var project = fixture.project()
         let inferred = try ProjectEnvironmentChecker().issues(for: project)
-        #expect(inferred.allSatisfy { $0.severity == .warning })
+        #expect(!inferred.isEmpty)
+        #expect(inferred.allSatisfy { $0.severity == .info })
+        #expect(PreflightResult(issues: inferred).isClear)
         project.reliability.requiredEnvironmentKeys = ["API_KEY"]
         let explicit = try ProjectEnvironmentChecker().issues(for: project)
         #expect(explicit.contains { $0.severity == .error })
+        #expect(!PreflightResult(issues: explicit).isClear)
         #expect(explicit.allSatisfy { !$0.message.contains("do-not-copy-value") })
     }
 

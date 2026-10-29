@@ -83,7 +83,7 @@ struct ProjectEnvironmentChecker {
         }
         let inferred = example.subtracting(explicit).filter { available[$0] != true }.sorted()
         if !inferred.isEmpty {
-            issues.append(PreflightIssue(severity: .warning, message: "Environment template keys missing or empty: \(inferred.joined(separator: ", ")). Review whether they are required."))
+            issues.append(PreflightIssue(severity: .info, message: "Environment template suggestions (missing or empty): \(inferred.joined(separator: ", "))."))
         }
         return issues
     }
