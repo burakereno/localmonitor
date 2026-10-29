@@ -162,6 +162,7 @@ struct StatusPanelView: View {
             }
 
             if let selected = selectedLogProject {
+                ProjectReliabilityDetailView(model: model, project: selected)
                 LogPreviewCardView(
                     project: selected,
                     logs: model.logs(for: selected)
@@ -211,6 +212,8 @@ struct StatusPanelView: View {
                 conflict: model.conflictOwner(for: project),
                 cleanRestartState: model.cleanRestartStates[project.id],
                 cacheState: model.cacheStates[project.id],
+                resourceState: model.resourceStates[project.id],
+                isInstalling: model.isInstallingDependencies(for: project),
                 browserHostnames: model.browserHostnames(for: project)
             ) {
                 Task { await model.startProject(project) }
@@ -560,6 +563,11 @@ struct StatusPanelView: View {
                                 onCommand: { model.updateCommandTemplate(for: project, command: $0) },
                                 onHostname: { model.updateHostname(for: project, hostname: $0) },
                                 onHealthPath: { model.updateHealthPath(for: project, healthPath: $0) }
+                            ),
+                            reliabilitySettings: ProjectReliabilitySettingsView(
+                                project: project, projects: model.projects,
+                                onSave: { model.updateReliability(for: project, settings: $0) },
+                                onPackageManager: { model.updatePackageManager(for: project, packageManager: $0) }
                             )
                         ) {
                             model.revealProject(project)
@@ -1344,7 +1352,7 @@ private struct QuickLaunchProjectButton: View {
             Button(action: onStop) {
                 Label("Stop", systemImage: "stop.fill")
             }
-            .disabled(!canStop || isBusy)
+            .disabled(!canStop)
 
             Button(action: onRestart) {
                 Label("Restart", systemImage: "arrow.clockwise")
@@ -1390,7 +1398,7 @@ private struct QuickLaunchProjectButton: View {
     private var canStop: Bool {
         switch state.status {
         case .stopped, .portBusy:
-            return false
+            return isPendingStart || operationState?.isActive == true
         case .starting, .running, .warmingUp, .responseDelayed, .portMismatch, .noPort, .noResponse, .crashed:
             return true
         }

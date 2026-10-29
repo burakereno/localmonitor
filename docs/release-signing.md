@@ -1,6 +1,6 @@
 # Release Signing
 
-Local Monitor release builds are Developer ID signed and notarized in GitHub Actions. Configure these repository secrets before pushing a release commit to `main`:
+Local Monitor release builds are Developer ID signed and notarized in GitHub Actions. Releases require an explicit user request and a manual **Build & Release** workflow run on `main`; pushing commits alone does not publish a version. Configure these repository secrets before starting the workflow:
 
 - `MACOS_CERTIFICATE_P12_BASE64`
 - `MACOS_CERTIFICATE_PASSWORD`

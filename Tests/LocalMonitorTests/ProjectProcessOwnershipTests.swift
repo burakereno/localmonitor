@@ -16,7 +16,7 @@ final class ProjectProcessOwnershipTests: XCTestCase {
             userDefaults: fixture.defaults,
             storageDirectoryURL: fixture.logDirectory
         )
-        try firstManager?.start(project: project)
+        try await firstManager?.start(project: project)
         let pid = try XCTUnwrap(firstManager?.rootPID(for: project.id))
         defer {
             if ProcessTree.isAlive(pid) {

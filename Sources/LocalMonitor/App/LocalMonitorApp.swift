@@ -15,13 +15,17 @@ struct LocalMonitorApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusController: StatusBarController?
-    private let model = LocalMonitorModel()
+    private let model = LocalMonitorPreview.makeModel()
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         DockIconController.shared.settingsChanged()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if LocalMonitorPreview.showIfRequested(model: model) {
+            model.start()
+            return
+        }
         NotificationService.shared.prepare()
         statusController = StatusBarController(model: model)
         DockIconController.shared.start(model: model)

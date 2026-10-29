@@ -207,6 +207,7 @@ struct LocalProject: Identifiable, Codable, Equatable {
     var healthPath: String
     var hostname: String
     var workspaceRootPath: String?
+    var reliability: ProjectReliabilitySettings
     var autoStart: Bool
     var autoRestart: Bool
     var openAfterStart: Bool
@@ -229,6 +230,7 @@ struct LocalProject: Identifiable, Codable, Equatable {
         healthPath: String = "/",
         hostname: String = "localhost",
         workspaceRootPath: String? = nil,
+        reliability: ProjectReliabilitySettings = ProjectReliabilitySettings(),
         autoStart: Bool = false,
         autoRestart: Bool = false,
         openAfterStart: Bool = true,
@@ -250,6 +252,7 @@ struct LocalProject: Identifiable, Codable, Equatable {
         self.healthPath = healthPath
         self.hostname = LocalHostname.normalize(hostname) ?? "localhost"
         self.workspaceRootPath = workspaceRootPath
+        self.reliability = reliability.validated
         self.autoStart = autoStart
         self.autoRestart = autoRestart
         self.openAfterStart = openAfterStart
@@ -273,6 +276,7 @@ struct LocalProject: Identifiable, Codable, Equatable {
         case healthPath
         case hostname
         case workspaceRootPath
+        case reliability
         case autoStart
         case autoRestart
         case openAfterStart
@@ -297,6 +301,7 @@ struct LocalProject: Identifiable, Codable, Equatable {
         healthPath = try container.decodeIfPresent(String.self, forKey: .healthPath) ?? "/"
         hostname = LocalHostname.normalize(try container.decodeIfPresent(String.self, forKey: .hostname) ?? "localhost") ?? "localhost"
         workspaceRootPath = try container.decodeIfPresent(String.self, forKey: .workspaceRootPath)
+        reliability = (try container.decodeIfPresent(ProjectReliabilitySettings.self, forKey: .reliability) ?? ProjectReliabilitySettings()).validated
         autoStart = try container.decodeIfPresent(Bool.self, forKey: .autoStart) ?? false
         autoRestart = try container.decodeIfPresent(Bool.self, forKey: .autoRestart) ?? false
         openAfterStart = try container.decodeIfPresent(Bool.self, forKey: .openAfterStart) ?? true
@@ -602,6 +607,7 @@ enum HealthState: Equatable {
 
 struct PreflightResult: Equatable {
     var issues: [PreflightIssue]
+    var launchEnvironment: ProjectLaunchEnvironment? = nil
 
     var isClear: Bool {
         issues.allSatisfy { $0.severity != .error }

@@ -6,6 +6,7 @@ struct ProjectSettingsEditorView: View {
     let autoRestart: Binding<Bool>
     let openAfterStart: Binding<Bool>
     let launchSettings: ProjectLaunchSettingsView
+    let reliabilitySettings: ProjectReliabilitySettingsView
     let onReveal: () -> Void
     let onRemove: () -> Void
     let onWorkspaceApps: () -> Void
@@ -58,6 +59,7 @@ struct ProjectSettingsEditorView: View {
                 .toggleStyle(.checkbox)
 
             launchSettings
+            reliabilitySettings
         }
         .padding(.vertical, 5)
     }

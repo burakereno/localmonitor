@@ -3,7 +3,7 @@ import Foundation
 /// Reads workspace metadata without executing project code or following external symlinks.
 enum ProjectWorkspace {
     static func package(in folder: URL) -> [String: Any]? {
-        guard let data = try? Data(contentsOf: folder.appendingPathComponent("package.json")) else { return nil }
+        guard let data = try? ProjectMetadata.data(at: folder.appendingPathComponent("package.json")) else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
@@ -46,9 +46,12 @@ enum ProjectWorkspace {
         let folder = folder.standardizedFileURL.resolvingSymlinksInPath()
         var candidate = folder.deletingLastPathComponent()
         while candidate.path != "/" {
+            // pnpm locates its workspace root through this file, independently of npm's workspaces field.
+            if FileManager.default.fileExists(atPath: candidate.appendingPathComponent("pnpm-workspace.yaml").path),
+               package(in: candidate) != nil { return candidate }
             let relative = String(folder.path.dropFirst(candidate.path.count + 1))
             if matches(relative, patterns: patterns(in: candidate)) { return candidate }
-            candidate.deleteLastPathComponent()
+            candidate = candidate.deletingLastPathComponent().standardizedFileURL
         }
         return nil
     }

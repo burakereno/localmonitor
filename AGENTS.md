@@ -21,3 +21,9 @@ swift test
 ```
 
 Use `./script/build_and_run.sh --verify` when launch verification is needed.
+
+## Release policy
+
+Do not bump the version, create tags or releases, or publish a new version unless
+the user explicitly requests it. Local builds and tests do not authorize release
+or replacement of the installed application.

@@ -234,7 +234,7 @@ final class WorkspaceLaunchTests: XCTestCase {
         project.commandTemplate = "/usr/bin/python3 -u host-server.py"
         project.hostname = "mirayoga.localhost"
         project.healthPath = "/health?probe=1"
-        try manager.start(project: project)
+        try await manager.start(project: project)
         defer { manager.stopAll() }
         let deadline = Date().addingTimeInterval(5)
         var port: Int?
@@ -339,7 +339,7 @@ final class WorkspaceLaunchTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let manager = ProjectProcessManager(userDefaults: defaults, storageDirectoryURL: fixture.root.appendingPathComponent("logs"))
         let project = ProjectLaunchMigration.migrate(fixture.legacyProject())
-        try manager.start(project: project)
+        try await manager.start(project: project)
         defer { manager.stopAll() }
         let deadline = Date().addingTimeInterval(8)
         while manager.isRunning(projectId: project.id), Date() < deadline {
@@ -359,7 +359,7 @@ final class WorkspaceLaunchTests: XCTestCase {
         let manager = ProjectProcessManager(userDefaults: defaults, storageDirectoryURL: fixture.root.appendingPathComponent("logs"))
         var project = fixture.legacyProject()
         project.commandTemplate = "PORT={port} /bin/sh -c 'echo ENV_PORT:$PORT'"
-        try manager.start(project: project)
+        try await manager.start(project: project)
         defer { manager.stopAll() }
         let deadline = Date().addingTimeInterval(5)
         while manager.isRunning(projectId: project.id), Date() < deadline {

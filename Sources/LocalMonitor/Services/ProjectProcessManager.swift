@@ -35,11 +35,13 @@ final class ProjectProcessManager {
     var onEvent: ((ProjectProcessEvent) -> Void)?
 
     private var processes: [UUID: RunningProcess] = [:]
+    private var pendingStarts: [UUID: UUID] = [:]
     private var records: [UUID: ManagedProjectProcessRecord]
     private let defaults: UserDefaults
     private let fileManager: FileManager
     private let storageDirectoryURL: URL
     private let encoder: JSONEncoder
+    private let nodeRuntimeResolver: ProjectNodeRuntimeResolver
 
     private static let recordsKey = "managedProjectProcesses"
     private static let maximumLogBytes: UInt64 = 10 * 1_024 * 1_024
@@ -48,10 +50,12 @@ final class ProjectProcessManager {
     init(
         userDefaults: UserDefaults = .standard,
         fileManager: FileManager = .default,
-        storageDirectoryURL: URL? = nil
+        storageDirectoryURL: URL? = nil,
+        nodeRuntimeResolver: ProjectNodeRuntimeResolver = ProjectNodeRuntimeResolver()
     ) {
         self.defaults = userDefaults
         self.fileManager = fileManager
+        self.nodeRuntimeResolver = nodeRuntimeResolver
         self.storageDirectoryURL = storageDirectoryURL
             ?? Self.defaultStorageDirectory(fileManager: fileManager)
 
@@ -135,10 +139,25 @@ final class ProjectProcessManager {
         return map
     }
 
-    func start(project: LocalProject) throws {
+    func start(project: LocalProject, launchEnvironment: ProjectLaunchEnvironment? = nil) async throws {
+        guard !isRunning(projectId: project.id), !isStarting(projectId: project.id) else {
+            throw ProjectProcessError.alreadyRunning
+        }
+
+        let requestID = UUID()
+        pendingStarts[project.id] = requestID
+        defer {
+            if pendingStarts[project.id] == requestID { pendingStarts.removeValue(forKey: project.id) }
+        }
+        let environment: ProjectLaunchEnvironment
+        if let launchEnvironment { environment = launchEnvironment }
+        else { environment = try await ProjectLaunchEnvironment.prepare(project, nodeResolver: nodeRuntimeResolver) }
+        guard pendingStarts[project.id] == requestID else { throw CancellationError() }
+        // Another Start may have completed while runtime discovery was suspended.
         guard !isRunning(projectId: project.id) else {
             throw ProjectProcessError.alreadyRunning
         }
+        try Task.checkCancellation()
 
         records.removeValue(forKey: project.id)
         let logURL = try prepareLogFile(for: project.id)
@@ -149,11 +168,11 @@ final class ProjectProcessManager {
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         // Keep the shell as the managed root so assignments and compound user
         // commands work; Stop already terminates its complete descendant tree.
-        process.arguments = ["-lc", project.resolvedCommand]
+        process.arguments = ["-lc", environment.command(project.resolvedCommand)]
         process.currentDirectoryURL = project.folderURL
         process.standardOutput = logHandle
         process.standardError = logHandle
-        process.environment = environment(for: project)
+        process.environment = self.environment(for: project)
 
         process.terminationHandler = { [weak self] terminated in
             let code = terminated.terminationStatus
@@ -183,8 +202,11 @@ final class ProjectProcessManager {
         onEvent?(.started(projectId: project.id, pid: process.processIdentifier))
     }
 
+    func isStarting(projectId: UUID) -> Bool { pendingStarts[projectId] != nil }
+
     @discardableResult
     func stop(projectId: UUID) -> Bool {
+        let cancelledStart = pendingStarts.removeValue(forKey: projectId) != nil
         let running = processes.removeValue(forKey: projectId)
         let record = records.removeValue(forKey: projectId)
         let pid = running?.process.processIdentifier ?? record.flatMap(validatedPID(for:))
@@ -192,14 +214,15 @@ final class ProjectProcessManager {
         try? running?.logHandle.close()
         persistRecords()
 
-        guard let pid else { return false }
+        guard let pid else { return cancelledStart }
         ProcessTree.terminate(pid: pid)
         return true
     }
 
     @discardableResult
     func stopAll() -> Set<UUID> {
-        var stoppedProjectIDs = Set<UUID>()
+        var stoppedProjectIDs = Set(pendingStarts.keys)
+        pendingStarts.removeAll()
         var rootPIDs = Set<Int32>()
 
         for (projectId, running) in processes where running.process.isRunning {

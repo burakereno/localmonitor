@@ -28,7 +28,7 @@ APP_VERSION="${APP_VERSION:-$DEFAULT_APP_VERSION}"
 APP_BUILD_NUMBER="${APP_BUILD_NUMBER:-${DEFAULT_BUILD_NUMBER:-1}}"
 BUNDLE_IDENTIFIER="${BUNDLE_IDENTIFIER:-dev.local.LocalMonitor.local}"
 
-swift build -c release
+swift build -c release --jobs "${LOCALMONITOR_BUILD_JOBS:-2}"
 
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$CONTENTS_DIR/Resources"

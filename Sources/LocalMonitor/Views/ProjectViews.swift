@@ -9,6 +9,8 @@ struct ProjectCardView: View {
     let conflict: DiscoveredPort?
     let cleanRestartState: CleanRestartState?
     let cacheState: ProjectCacheState?
+    var resourceState: ProjectResourceState? = nil
+    var isInstalling = false
     let browserHostnames: [String]
     let onStart: () -> Void
     let onStop: () -> Void
@@ -58,7 +60,7 @@ struct ProjectCardView: View {
                         systemName: "arrow.clockwise",
                         help: "Restart",
                         tint: .orange,
-                        disabled: state.status == .starting || cleanRestartState?.isActive == true,
+                        disabled: isInstalling || state.status == .starting || cleanRestartState?.isActive == true,
                         action: onRestart
                     )
                 }
@@ -85,7 +87,7 @@ struct ProjectCardView: View {
                     onOpenHostname: onOpenHostname
                 )
                 IconActionButton(systemName: "link", help: "Copy Localhost URL", action: onCopyURL)
-                IconActionButton(systemName: "doc.text.magnifyingglass", help: "Show Logs", action: onLogs)
+                IconActionButton(systemName: "doc.text.magnifyingglass", help: "Requirements, Diagnostics & Logs", action: onLogs)
             }
 
             if project.kind.supportsCleanRestart {
@@ -94,10 +96,20 @@ struct ProjectCardView: View {
                     operationState: cacheOperationState,
                     action: onCleanRestart
                 )
+                .disabled(isInstalling)
             }
 
-            if let preflight, !preflight.issues.isEmpty {
-                Text(preflight.summary)
+            if isInstalling { Text("Installing dependencies…").font(.caption).foregroundStyle(.secondary) }
+
+            if let sample = resourceState?.samples.last {
+                Text((state.pid == nil ? "Last: " : "") + sample.summary).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+                if let warning = resourceState?.warning {
+                    Label(warning, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
+                }
+            }
+
+            if let preflight, preflight.issues.contains(where: { $0.severity != .info }) {
+                Text(preflight.issues.filter { $0.severity != .info }.map(\.message).joined(separator: " · "))
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(preflight.isClear ? .orange : .red)
                     .lineLimit(2)
@@ -171,6 +183,7 @@ struct ProjectCardView: View {
     }
 
     private var startDisabled: Bool {
+        if isInstalling { return true }
         switch state.status {
         case .running, .warmingUp, .responseDelayed, .starting, .portMismatch, .noPort, .noResponse:
             return true

@@ -32,7 +32,23 @@ final class LocalMonitorModel: ObservableObject {
     @Published private(set) var projectIdentities: [UUID: ProjectIdentity] = [:]
     @Published private(set) var projectBrowserHostnames: [UUID: [String]] = [:]
     @Published private(set) var healthStates: [UUID: HealthState] = [:]
-    @Published private(set) var preflightResults: [UUID: PreflightResult] = [:]
+    @Published var preflightResults: [UUID: PreflightResult] = [:]
+    @Published var resourceStates: [UUID: ProjectResourceState] = [:]
+    @Published var failureHistory: [UUID: [ProjectFailureRecord]] = [:]
+    @Published var installationStates: [UUID: ProjectInstallationState] = [:]
+    @Published var checkingProjects: Set<UUID> = []
+    var dependencyLaunchTasks: [UUID: Task<Void, Never>] = [:]
+    var dependencyLaunchMembers: [UUID: Set<UUID>] = [:]
+    var projectLaunchRequests: [UUID: UUID] = [:]
+    var preflightTasks: [UUID: Task<PreflightResult, Never>] = [:]
+    var stopVerificationTasks: [UUID: Task<Void, Never>] = [:]
+    var maintenanceRequests: [UUID: UUID] = [:]
+    var bulkStartGeneration = UUID()
+    var groupStartRequests: [UUID: UUID] = [:]
+    var installationTasks: [UUID: Task<Void, Never>] = [:]
+    var automaticRestartTasks: [UUID: Task<Void, Never>] = [:]
+    var restartBudgets: [UUID: ProjectRestartBudget] = [:]
+    var dependencyInstallation = ProjectDependencyInstallation()
     @Published private(set) var discoveredPorts: [DiscoveredPort] = []
     @Published private(set) var pinnedPortNames: [Int: String] = [:]
     @Published private(set) var ignoredPorts: Set<Int> = []
@@ -54,11 +70,11 @@ final class LocalMonitorModel: ObservableObject {
     private let portScanner: PortScanner
     private let portKiller: PortKiller
     private let projectInspector: ProjectInspector
-    private let preflightChecker: PreflightChecker
-    private let healthChecker: any HealthChecking
-    private let notificationService: NotificationService
-    private let processManager: ProjectProcessManager
-    private let defaults: UserDefaults
+    let preflightChecker: PreflightChecker
+    let healthChecker: any HealthChecking
+    let notificationService: NotificationService
+    let processManager: ProjectProcessManager
+    let defaults: UserDefaults
     private var refreshTask: Task<Void, Never>?
     private var cacheSizeTask: Task<Void, Never>?
     private var projectPanel: NSOpenPanel?
@@ -123,6 +139,7 @@ final class LocalMonitorModel: ObservableObject {
 
         updateMenuBarTitle()
         refreshBrowserHostnames()
+        loadFailureHistory()
     }
 
     func start() {
@@ -140,6 +157,7 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func stop() {
+        cancelAllReliabilityOperations()
         refreshTask?.cancel()
         refreshTask = nil
     }
@@ -183,6 +201,7 @@ final class LocalMonitorModel: ObservableObject {
             lastError = error.localizedDescription
         }
 
+        await refreshResourceMeasurements()
         persistRuntimeSessions()
         lastUpdated = Date()
         updateMenuBarTitle()
@@ -340,6 +359,10 @@ final class LocalMonitorModel: ObservableObject {
         preflightResults.removeValue(forKey: project.id)
         cleanRestartStates.removeValue(forKey: project.id)
         cacheStates.removeValue(forKey: project.id)
+        resourceStates.removeValue(forKey: project.id)
+        installationStates.removeValue(forKey: project.id)
+        clearFailureHistory(for: project)
+        restartBudgets.removeValue(forKey: project.id)
         if selectedLogProjectID == project.id {
             selectedLogProjectID = nil
         }
@@ -347,19 +370,45 @@ final class LocalMonitorModel: ObservableObject {
         updateMenuBarTitle()
     }
 
-    func startProject(_ project: LocalProject, recordsUsage: Bool = true) async {
+    func startProject(_ project: LocalProject, recordsUsage: Bool = true,
+                      withDependencies: Bool = true, prechecked: PreflightResult? = nil) async {
+        guard projects.contains(where: { $0.id == project.id }), !Task.isCancelled else { return }
+        stopVerificationTasks.removeValue(forKey: project.id)?.cancel()
         if recordsUsage {
+            resetAutomaticRestarts(for: project.id)
             recordProjectUse(project)
         }
+
+        if isInstallingDependencies(for: project) { return }
 
         let state = runtimeState(for: project)
         if state.status == .running || state.status == .warmingUp || state.status == .responseDelayed || state.status == .starting || state.status == .portMismatch || state.status == .noPort || state.status == .noResponse {
             return
         }
 
+        if withDependencies, !project.reliability.dependencyProjectIDs.isEmpty || !project.reliability.composeServices.isEmpty {
+            await startDependencyChain(for: project)
+            return
+        }
+
+        guard projectLaunchRequests[project.id] == nil else { return }
+        let request = UUID()
+        projectLaunchRequests[project.id] = request
+        defer {
+            if projectLaunchRequests[project.id] == request {
+                projectLaunchRequests.removeValue(forKey: project.id)
+                preflightTasks.removeValue(forKey: project.id)
+                if Task.isCancelled, runtimeStates[project.id]?.status == .starting,
+                   !processManager.isRunning(projectId: project.id) {
+                    setState(for: project.id, status: .stopped)
+                }
+            }
+        }
+
         if let owner = matchingProjectPortOwner(for: project) {
             markRunning(project, owner: owner)
             await checkReadiness(for: project, force: true)
+            guard !Task.isCancelled, projectLaunchRequests[project.id] == request else { return }
             if runtimeState(for: project).status == .running, project.openAfterStart {
                 openInBrowser(project, recordsUsage: false)
             }
@@ -380,7 +429,16 @@ final class LocalMonitorModel: ObservableObject {
             return
         }
 
-        let preflight = await preflightChecker.check(project)
+        let preflight: PreflightResult
+        setState(for: project.id, status: .starting, message: "Checking launch requirements…")
+        if let prechecked { preflight = prechecked } else {
+            let checker = preflightChecker
+            let task = Task { await checker.check(project) }
+            preflightTasks[project.id] = task
+            preflight = await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+        }
+        guard !Task.isCancelled, projectLaunchRequests[project.id] == request,
+              projects.contains(where: { $0.id == project.id }) else { return }
         preflightResults[project.id] = preflight
         if !preflight.isClear {
             setState(for: project.id, status: .crashed, message: preflight.summary)
@@ -396,14 +454,18 @@ final class LocalMonitorModel: ObservableObject {
         )
 
         do {
-            try processManager.start(project: project)
+            try await processManager.start(project: project, launchEnvironment: preflight.launchEnvironment)
+        } catch is CancellationError {
+            return
         } catch {
             setState(for: project.id, status: .crashed, message: error.localizedDescription)
             return
         }
 
         try? await Task.sleep(nanoseconds: 900_000_000)
+        guard !Task.isCancelled, projectLaunchRequests[project.id] == request else { return }
         await refresh()
+        guard !Task.isCancelled, projectLaunchRequests[project.id] == request else { return }
         let refreshedState = runtimeState(for: project)
 
         if refreshedState.status == .running, project.openAfterStart {
@@ -415,8 +477,13 @@ final class LocalMonitorModel: ObservableObject {
         stopProject(project, schedulesVerification: true)
     }
 
+    func cancelMaintenance(for id: UUID) {
+        if maintenanceRequests.removeValue(forKey: id) != nil { cleanRestartStates.removeValue(forKey: id) }
+    }
+
     private func stopProject(_ project: LocalProject, schedulesVerification: Bool) {
-        if processManager.isRunning(projectId: project.id) {
+        cancelReliabilityOperations(for: project.id)
+        if processManager.isRunning(projectId: project.id) || processManager.isStarting(projectId: project.id) {
             processManager.stop(projectId: project.id)
         } else if let owner = matchingProjectProcessOwner(for: project) {
             ProcessTree.terminate(pid: owner.pid)
@@ -428,13 +495,19 @@ final class LocalMonitorModel: ObservableObject {
         persistRuntimeSessions()
         updateMenuBarTitle()
         if schedulesVerification {
-            Task { await verifyStopped(project) }
+            stopVerificationTasks[project.id] = Task { [weak self] in
+                guard let self else { return }
+                defer { if !Task.isCancelled { self.stopVerificationTasks.removeValue(forKey: project.id) } }
+                await self.verifyStopped(project)
+            }
         }
     }
 
     private func verifyStopped(_ project: LocalProject) async {
         try? await Task.sleep(nanoseconds: 1_000_000_000)
+        guard !Task.isCancelled, projects.contains(where: { $0.id == project.id }) else { return }
         await refresh()
+        guard !Task.isCancelled, projects.contains(where: { $0.id == project.id }) else { return }
 
         guard let owner = matchingProjectProcessOwner(for: project) else {
             runtimeStates[project.id] = .stopped
@@ -447,7 +520,9 @@ final class LocalMonitorModel: ObservableObject {
 
         ProcessTree.terminate(pid: owner.pid)
         try? await Task.sleep(nanoseconds: 700_000_000)
+        guard !Task.isCancelled, projects.contains(where: { $0.id == project.id }) else { return }
         await refresh()
+        guard !Task.isCancelled, projects.contains(where: { $0.id == project.id }) else { return }
 
         if let remainingOwner = matchingProjectProcessOwner(for: project) {
             markPortMismatch(project, owner: remainingOwner)
@@ -463,6 +538,8 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func restartProject(_ project: LocalProject) async {
+        guard !isInstallingDependencies(for: project), projects.contains(where: { $0.id == project.id }) else { return }
+        resetAutomaticRestarts(for: project.id)
         guard cleanRestartStates[project.id]?.isActive != true else { return }
         recordProjectUse(project)
 
@@ -476,7 +553,11 @@ final class LocalMonitorModel: ObservableObject {
             operation: .restart
         )
         stopProject(project, schedulesVerification: false)
+        let request = UUID()
+        maintenanceRequests[project.id] = request
+        defer { if maintenanceRequests[project.id] == request { maintenanceRequests.removeValue(forKey: project.id) } }
         await refreshAfterProcessStop()
+        guard maintenanceRequests[project.id] == request, !Task.isCancelled else { return }
         setCleanRestartState(
             for: project,
             phase: .starting,
@@ -486,6 +567,7 @@ final class LocalMonitorModel: ObservableObject {
             operation: .restart
         )
         await startProject(project, recordsUsage: false)
+        guard maintenanceRequests[project.id] == request, !Task.isCancelled else { return }
 
         let state = runtimeState(for: project)
         guard state.status == .running || state.status == .warmingUp || state.status == .responseDelayed || state.status == .portMismatch || state.status == .noPort else {
@@ -514,7 +596,8 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func cleanRestartProject(_ project: LocalProject) async {
-        guard project.kind.supportsCleanRestart else { return }
+        guard project.kind.supportsCleanRestart, !isInstallingDependencies(for: project),
+              projects.contains(where: { $0.id == project.id }) else { return }
         guard cleanRestartStates[project.id]?.isActive != true else { return }
         recordProjectUse(project)
 
@@ -530,7 +613,13 @@ final class LocalMonitorModel: ObservableObject {
             )
             appendLog(projectId: project.id, text: "Cache clean: stopping project.")
             stopProject(project, schedulesVerification: false)
+        }
+        let request = UUID()
+        maintenanceRequests[project.id] = request
+        defer { if maintenanceRequests[project.id] == request { maintenanceRequests.removeValue(forKey: project.id) } }
+        if shouldRestartAfterClean {
             await refreshAfterProcessStop()
+            guard maintenanceRequests[project.id] == request, !Task.isCancelled else { return }
         }
 
         setCleanRestartState(
@@ -543,6 +632,7 @@ final class LocalMonitorModel: ObservableObject {
 
         do {
             let removedPaths = try await removeCleanCaches(for: project)
+            guard maintenanceRequests[project.id] == request, !Task.isCancelled else { return }
             if removedPaths.isEmpty {
                 appendLog(projectId: project.id, text: "Cache clean: no cache folders found.")
             } else {
@@ -550,6 +640,7 @@ final class LocalMonitorModel: ObservableObject {
             }
             await refreshCacheState(for: project, force: true)
         } catch {
+            guard maintenanceRequests[project.id] == request, !Task.isCancelled else { return }
             setCleanRestartState(
                 for: project,
                 phase: .failed,
@@ -564,6 +655,7 @@ final class LocalMonitorModel: ObservableObject {
             clearCleanRestartStateLater(for: project.id)
             return
         }
+        guard maintenanceRequests[project.id] == request, !Task.isCancelled else { return }
 
         guard shouldRestartAfterClean else {
             setCleanRestartState(
@@ -586,6 +678,7 @@ final class LocalMonitorModel: ObservableObject {
             keepsOnlineGroup: keepOnlineGroup
         )
         await startProject(project, recordsUsage: false)
+        guard maintenanceRequests[project.id] == request, !Task.isCancelled else { return }
 
         if healthChecksEnabled {
             setCleanRestartState(
@@ -596,6 +689,7 @@ final class LocalMonitorModel: ObservableObject {
                 keepsOnlineGroup: keepOnlineGroup
             )
             await checkReadiness(for: project, force: true)
+            guard maintenanceRequests[project.id] == request, !Task.isCancelled else { return }
         }
 
         let state = runtimeState(for: project)
@@ -625,25 +719,33 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func startAllProjects() async {
+        let generation = bulkStartGeneration
         for project in projects {
+            guard generation == bulkStartGeneration, !Task.isCancelled else { return }
             await startProject(project, recordsUsage: false)
         }
     }
 
     func startAutoStartProjects() async {
+        let generation = bulkStartGeneration
         for project in projects where project.autoStart {
+            guard generation == bulkStartGeneration, !Task.isCancelled else { return }
             await startProject(project, recordsUsage: false)
         }
     }
 
     func startAutoStartGroups() async {
+        let generation = bulkStartGeneration
         for group in groups where group.autoStart {
+            guard generation == bulkStartGeneration, !Task.isCancelled else { return }
             await startGroup(group)
         }
     }
 
     func stopAllProjects() {
-        let stoppedProjectIDs = processManager.stopAll()
+        let pending = Set(dependencyLaunchTasks.keys).union(projectLaunchRequests.keys).union(maintenanceRequests.keys)
+        cancelAllReliabilityOperations()
+        let stoppedProjectIDs = processManager.stopAll().union(pending)
         for project in projects where stoppedProjectIDs.contains(project.id) {
             runtimeStates[project.id] = .stopped
             invalidateReadinessCheck(for: project.id)
@@ -810,8 +912,23 @@ final class LocalMonitorModel: ObservableObject {
 
     func updatePackageManager(for project: LocalProject, packageManager: PackageManager) {
         updateProject(project) { mutable in
+            for (old, new) in [(mutable.packageManager.devCommand, packageManager.devCommand),
+                               (mutable.packageManager.startCommand, packageManager.startCommand)] {
+                let command = mutable.commandTemplate
+                if command == old || command.hasPrefix(old + " ") {
+                    var arguments = String(command.dropFirst(old.count)).trimmingCharacters(in: .whitespaces)
+                    if mutable.packageManager == .npm, arguments.hasPrefix("-- ") { arguments = String(arguments.dropFirst(3)) }
+                    mutable.commandTemplate = new + packageManager.scriptArguments(arguments)
+                    break
+                }
+            }
             mutable.packageManager = packageManager
         }
+    }
+
+    func updateReliability(for project: LocalProject, settings: ProjectReliabilitySettings) {
+        updateProject(project) { $0.reliability = settings.validated }
+        resetAutomaticRestarts(for: project.id)
     }
 
     func updateHealthPath(for project: LocalProject, healthPath: String) {
@@ -826,6 +943,7 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func updateAutoRestart(for project: LocalProject, enabled: Bool) {
+        if !enabled { resetAutomaticRestarts(for: project.id) }
         updateProject(project) { mutable in
             mutable.autoRestart = enabled
         }
@@ -913,12 +1031,17 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func startGroup(_ group: WorkspaceGroup) async {
+        let request = UUID(), generation = bulkStartGeneration
+        groupStartRequests[group.id] = request
+        defer { if groupStartRequests[group.id] == request { groupStartRequests.removeValue(forKey: group.id) } }
         for project in projects where group.projectIDs.contains(project.id) {
+            guard groupStartRequests[group.id] == request, generation == bulkStartGeneration, !Task.isCancelled else { return }
             await startProject(project, recordsUsage: false)
         }
     }
 
     func stopGroup(_ group: WorkspaceGroup) {
+        groupStartRequests.removeValue(forKey: group.id)
         for project in projects where group.projectIDs.contains(project.id) {
             stopProject(project)
         }
@@ -1183,6 +1306,13 @@ final class LocalMonitorModel: ObservableObject {
         guard let index = projects.firstIndex(where: { $0.id == project.id }) else { return }
         let previous = projects[index]
         mutate(&projects[index])
+        if previous.path != projects[index].path || previous.commandTemplate != projects[index].commandTemplate
+            || previous.packageManager != projects[index].packageManager || previous.reliability != projects[index].reliability {
+            cancelReliabilityOperations(for: project.id)
+            if runtimeStates[project.id]?.status == .starting, !processManager.isRunning(projectId: project.id) {
+                runtimeStates[project.id] = .stopped
+            }
+        }
         if previous.healthURL != projects[index].healthURL || previous.path != projects[index].path {
             invalidateReadinessCheck(for: project.id)
             runtimeStates[project.id]?.readiness = ProjectReadinessState()
@@ -1246,11 +1376,11 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     private func clearCleanRestartStateLater(for projectId: UUID) {
+        let completed = cleanRestartStates[projectId]
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 1_600_000_000)
-            _ = await MainActor.run {
-                self?.cleanRestartStates.removeValue(forKey: projectId)
-            }
+            guard let self, self.cleanRestartStates[projectId] == completed else { return }
+            self.cleanRestartStates.removeValue(forKey: projectId)
         }
     }
 
@@ -1600,6 +1730,9 @@ final class LocalMonitorModel: ObservableObject {
                         state.status = .starting
                     }
                     runtimeStates[project.id] = state
+                } else if projectLaunchRequests[project.id] != nil || dependencyLaunchTasks[project.id] != nil {
+                    state.status = .starting
+                    runtimeStates[project.id] = state
                 } else if state.isWithinSessionContinuityGrace(
                     now: now,
                     continuityGrace: sessionContinuityGraceInterval
@@ -1681,7 +1814,7 @@ final class LocalMonitorModel: ObservableObject {
         )
     }
 
-    private func setState(
+    func setState(
         for projectId: UUID,
         status: ProjectRunStatus,
         ownership: ProjectProcessOwnership? = nil,
@@ -1738,25 +1871,24 @@ final class LocalMonitorModel: ObservableObject {
             state.pid = nil
             state.observedPort = nil
             state.clearSessionTiming()
-            state.lastMessage = code == 0 ? "Stopped." : "Exited with code \(code)."
+            let diagnosis = ProjectFailureDiagnosis.classify(logs: processManager.logLines(for: projectId), exitCode: code)
+            state.lastMessage = code == 0 ? "Stopped." : "\(diagnosis.title). \(diagnosis.recovery)"
             runtimeStates[projectId] = state
             healthStates[projectId] = .unknown
             persistRuntimeSessions()
             updateMenuBarTitle()
 
             guard code != 0, let project = projects.first(where: { $0.id == projectId }) else { return }
-            notificationService.notify(title: "\(project.displayName) crashed", body: "Exited with code \(code).")
+            recordFailure(for: project, code: code, diagnosis: diagnosis)
+            notificationService.notify(title: "\(project.displayName) crashed", body: diagnosis.title)
 
             if project.autoRestart {
-                Task { [weak self] in
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                    await self?.startProject(project)
-                }
+                scheduleAutomaticRestart(for: project)
             }
         }
     }
 
-    private func appendLog(projectId: UUID, text: String) {
+    func appendLog(projectId: UUID, text: String) {
         processManager.appendLog(projectId: projectId, text: text)
         var state = runtimeStates[projectId] ?? .stopped
         let lines = text

@@ -1,9 +1,11 @@
 name: Build & Release
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
+
+concurrency:
+  group: localmonitor-release
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -16,6 +18,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Require Main Branch
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Publish releases from main only."
+            exit 1
+          fi
 
       - name: Load Release Contract
         run: |
@@ -31,7 +40,7 @@ jobs:
 
       - name: Run Tests
         timeout-minutes: 10
-        run: swift test
+        run: swift test --jobs 2
 
       - name: Validate Signing Secrets
         env:
