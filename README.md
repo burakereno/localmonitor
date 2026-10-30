@@ -1,7 +1,7 @@
 # Local Monitor
 
 <p align="center">
-  <img src="https://localmonitor.burakerenoglu.com/apps/localmonitor/icon-rounded-20261030.webp" alt="Local Monitor" width="340" height="340">
+  <img src="https://localmonitor.burakerenoglu.com/apps/localmonitor/icon-rounded-20261030.webp" alt="Local Monitor" width="340">
 </p>
 
 **Native macOS menu bar control for local web projects and ports.** Start, stop, inspect, group, and clean local Next.js, Astro, Hono, and other dev servers right from your menu bar.
