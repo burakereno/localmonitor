@@ -3,7 +3,7 @@ import Testing
 @testable import LocalMonitor
 
 struct ProjectDependencyInstallationTests {
-    @Test(arguments: ["cancel", "remove", "caller"]) @MainActor func cancelledInstallDoesNotRestoreRemovedProjectState(_ action: String) async throws {
+    @Test(.timeLimit(.minutes(1)), arguments: ["cancel", "remove", "caller"]) @MainActor func cancelledInstallDoesNotRestoreRemovedProjectState(_ action: String) async throws {
         let fixture = try ReliabilityFixture(); defer { fixture.cleanup() }
         let node = try fixture.node()
         try fixture.write(".node-version", "24\n")
@@ -27,9 +27,15 @@ struct ProjectDependencyInstallationTests {
         defer { model.stopAllProjects() }
         let install = Task { await model.installDependencies(for: project) }
         let marker = fixture.root.appendingPathComponent("installing")
-        let deadline = Date().addingTimeInterval(4)
-        while !FileManager.default.fileExists(atPath: marker.path), Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
-        try #require(FileManager.default.fileExists(atPath: marker.path))
+        // Runtime discovery launches several probes; busy CI hosts can take more than four seconds.
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(20))
+        while !FileManager.default.fileExists(atPath: marker.path), clock.now < deadline {
+            if let state = model.installationStates[project.id], state != .running { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try #require(FileManager.default.fileExists(atPath: marker.path),
+                     "Fixture installer did not start; state: \(String(describing: model.installationStates[project.id]))")
         if action == "remove" { model.removeProject(project) }
         else if action == "caller" { install.cancel() }
         else { model.cancelInstallation(for: project) }
