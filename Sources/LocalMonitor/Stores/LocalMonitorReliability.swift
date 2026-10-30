@@ -167,9 +167,10 @@ extension LocalMonitorModel {
             guard let pids = roots[project.id] else { continue }
             let sample = sampler.aggregate(roots: pids, entries: snapshot)
             var state = resourceStates[project.id] ?? ProjectResourceState()
-            let notify = state.record(sample, settings: project.reliability)
+            let warning = state.record(sample, settings: project.reliability,
+                                       alerts: .load(from: defaults))
             resourceStates[project.id] = state
-            if notify, let warning = state.warning {
+            if let warning {
                 notificationService.notify(title: "\(project.displayName) resource usage", body: warning)
             }
         }

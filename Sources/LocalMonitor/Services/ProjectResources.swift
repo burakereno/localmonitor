@@ -1,5 +1,18 @@
 import Foundation
 
+struct ProjectResourceAlertPreferences {
+    var cpuEnabled = false
+    var memoryEnabled = false
+
+    static func load(from defaults: UserDefaults) -> Self {
+        let notificationsEnabled = defaults.object(forKey: AppPreference.notificationsKey) as? Bool ?? true
+        return Self(
+            cpuEnabled: notificationsEnabled && defaults.bool(forKey: AppPreference.projectCPUAlertsKey),
+            memoryEnabled: notificationsEnabled && defaults.bool(forKey: AppPreference.projectMemoryAlertsKey)
+        )
+    }
+}
+
 struct ProjectResourceSample: Equatable {
     var date = Date()
     let cpuPercent: Double
@@ -16,27 +29,36 @@ struct ProjectResourceState: Equatable {
     var warning: String?
     var lastNotification: Date?
 
-    mutating func record(_ sample: ProjectResourceSample, settings: ProjectReliabilitySettings) -> Bool {
+    mutating func record(
+        _ sample: ProjectResourceSample,
+        settings: ProjectReliabilitySettings,
+        alerts: ProjectResourceAlertPreferences = .init()
+    ) -> String? {
         samples.append(sample)
         samples = Array(samples.suffix(40))
         let limits = settings.validated
         let recent = samples.suffix(3)
-        var message: String?
+        var memoryLimitWarning: String?
+        var memoryGrowthWarning: String?
+        var cpuWarning: String?
         if recent.count == 3, recent.allSatisfy({ $0.memoryBytes > Int64(limits.memoryWarningMB) * 1_048_576 }) {
-            message = "Memory usage stayed above \(limits.memoryWarningMB) MB. Inspect or stop this project."
-        } else if recent.count == 3, recent.allSatisfy({ $0.cpuPercent > Double(limits.cpuWarningPercent) }) {
-            message = "CPU usage stayed above \(limits.cpuWarningPercent)%. Inspect or stop this project."
+            memoryLimitWarning = "Memory usage stayed above \(limits.memoryWarningMB) MB. Inspect or stop this project."
         } else {
             let growth = Array(samples.suffix(5))
             if growth.count == 5, zip(growth, growth.dropFirst()).allSatisfy({ $1.memoryBytes > $0.memoryBytes }),
                growth.last!.memoryBytes - growth.first!.memoryBytes > 512 * 1_048_576 {
-                message = "Memory is continuously growing (over 512 MB across five samples). Inspect this project's child processes."
+                memoryGrowthWarning = "Memory is continuously growing (over 512 MB across five samples). Inspect this project's child processes."
             }
         }
-        warning = message
-        guard message != nil, lastNotification.map({ sample.date.timeIntervalSince($0) >= 120 }) ?? true else { return false }
+        if recent.count == 3, recent.allSatisfy({ $0.cpuPercent > Double(limits.cpuWarningPercent) }) {
+            cpuWarning = "CPU usage stayed above \(limits.cpuWarningPercent)%. Inspect or stop this project."
+        }
+        warning = memoryLimitWarning ?? cpuWarning ?? memoryGrowthWarning
+        let memoryWarning = memoryLimitWarning ?? memoryGrowthWarning
+        let message = (alerts.memoryEnabled ? memoryWarning : nil) ?? (alerts.cpuEnabled ? cpuWarning : nil)
+        guard let message, lastNotification.map({ sample.date.timeIntervalSince($0) >= 120 }) ?? true else { return nil }
         lastNotification = sample.date
-        return true
+        return message
     }
 }
 

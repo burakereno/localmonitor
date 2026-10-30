@@ -28,10 +28,10 @@ struct ProjectReliabilityMonitoringTests {
         for index in 0..<100 {
             let sample = ProjectResourceSample(date: start.addingTimeInterval(Double(index * 15)), cpuPercent: 10,
                                                 memoryBytes: 256 * 1_048_576, processCount: 2)
-            let notify = state.record(sample, settings: settings)
-            if index < 2 { #expect(notify == false) }
-            if index == 2 { #expect(notify) }
-            if index == 3 { #expect(notify == false) }
+            let notification = state.record(sample, settings: settings, alerts: .init(memoryEnabled: true))
+            if index < 2 { #expect(notification == nil) }
+            if index == 2 { #expect(notification?.contains("Memory usage") == true) }
+            if index == 3 { #expect(notification == nil) }
         }
         #expect(state.samples.count == 40)
         #expect(state.warning?.contains("Memory usage") == true)

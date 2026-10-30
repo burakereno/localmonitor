@@ -852,6 +852,8 @@ enum AppPreference {
     static let showDockValuesKey = "showDockValues"
     static let safeKillKey = "safeKill"
     static let notificationsKey = "notifications"
+    static let projectCPUAlertsKey = "projectCPUAlerts"
+    static let projectMemoryAlertsKey = "projectMemoryAlerts"
     static let healthChecksKey = "healthChecks"
 
     static var defaultPort: Int {

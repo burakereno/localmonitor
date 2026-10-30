@@ -24,6 +24,8 @@ struct StatusPanelView: View {
     @AppStorage(AppPreference.showDockValuesKey) private var showDockValues = false
     @AppStorage(AppPreference.safeKillKey) private var safeKill = true
     @AppStorage(AppPreference.notificationsKey) private var notifications = true
+    @AppStorage(AppPreference.projectCPUAlertsKey) private var projectCPUAlerts = false
+    @AppStorage(AppPreference.projectMemoryAlertsKey) private var projectMemoryAlerts = false
     @AppStorage(AppPreference.healthChecksKey) private var healthChecks = false
 
     @State private var activePanel = PanelMode.dashboard
@@ -387,14 +389,34 @@ struct StatusPanelView: View {
                     subtitle: "Stop all Local Monitor-managed projects when quitting",
                     isOn: $stopProjectsOnQuit
                 )
+            }
+
+            SettingsSectionView(title: "NOTIFICATIONS") {
+                SettingsToggleRowView(
+                    icon: "bell",
+                    title: "Notifications",
+                    subtitle: "Allow Local Monitor notifications",
+                    isOn: $notifications
+                )
 
                 Divider().opacity(0.35).padding(.vertical, 5)
 
                 SettingsToggleRowView(
-                    icon: "bell",
-                    title: "Notifications",
-                    subtitle: "Show ready, crash, and health alerts",
-                    isOn: $notifications
+                    icon: "cpu",
+                    title: "Project CPU Alerts",
+                    subtitle: "Notify when a project stays above its CPU limit",
+                    isOn: $projectCPUAlerts,
+                    disabled: !notifications
+                )
+
+                Divider().opacity(0.35).padding(.vertical, 5)
+
+                SettingsToggleRowView(
+                    icon: "memorychip",
+                    title: "Project RAM Alerts",
+                    subtitle: "Notify about high or growing project memory",
+                    isOn: $projectMemoryAlerts,
+                    disabled: !notifications
                 )
             }
 
