@@ -36,6 +36,7 @@ final class LocalMonitorModel: ObservableObject {
     @Published var resourceStates: [UUID: ProjectResourceState] = [:]
     @Published var failureHistory: [UUID: [ProjectFailureRecord]] = [:]
     @Published var installationStates: [UUID: ProjectInstallationState] = [:]
+    @Published var nodeInstallationStates: [UUID: ProjectNodeInstallationState] = [:]
     @Published var checkingProjects: Set<UUID> = []
     var dependencyLaunchTasks: [UUID: Task<Void, Never>] = [:]
     var dependencyLaunchMembers: [UUID: Set<UUID>] = [:]
@@ -46,6 +47,8 @@ final class LocalMonitorModel: ObservableObject {
     var bulkStartGeneration = UUID()
     var groupStartRequests: [UUID: UUID] = [:]
     var installationTasks: [UUID: Task<Void, Never>] = [:]
+    var nodeInstallationTasks: [UUID: Task<Void, Never>] = [:]
+    var nodeInstaller = ProjectNodeInstaller()
     var automaticRestartTasks: [UUID: Task<Void, Never>] = [:]
     var restartBudgets: [UUID: ProjectRestartBudget] = [:]
     var dependencyInstallation = ProjectDependencyInstallation()
@@ -361,6 +364,7 @@ final class LocalMonitorModel: ObservableObject {
         cacheStates.removeValue(forKey: project.id)
         resourceStates.removeValue(forKey: project.id)
         installationStates.removeValue(forKey: project.id)
+        nodeInstallationStates.removeValue(forKey: project.id)
         clearFailureHistory(for: project)
         restartBudgets.removeValue(forKey: project.id)
         if selectedLogProjectID == project.id {
@@ -379,7 +383,7 @@ final class LocalMonitorModel: ObservableObject {
             recordProjectUse(project)
         }
 
-        if isInstallingDependencies(for: project) { return }
+        if isInstallingDependencies(for: project) || isInstallingNode(for: project) { return }
 
         let state = runtimeState(for: project)
         if state.status == .running || state.status == .warmingUp || state.status == .responseDelayed || state.status == .starting || state.status == .portMismatch || state.status == .noPort || state.status == .noResponse {
@@ -538,7 +542,8 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func restartProject(_ project: LocalProject) async {
-        guard !isInstallingDependencies(for: project), projects.contains(where: { $0.id == project.id }) else { return }
+        guard !isInstallingDependencies(for: project), !isInstallingNode(for: project),
+              projects.contains(where: { $0.id == project.id }) else { return }
         resetAutomaticRestarts(for: project.id)
         guard cleanRestartStates[project.id]?.isActive != true else { return }
         recordProjectUse(project)
@@ -596,7 +601,7 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func cleanRestartProject(_ project: LocalProject) async {
-        guard project.kind.supportsCleanRestart, !isInstallingDependencies(for: project),
+        guard project.kind.supportsCleanRestart, !isInstallingDependencies(for: project), !isInstallingNode(for: project),
               projects.contains(where: { $0.id == project.id }) else { return }
         guard cleanRestartStates[project.id]?.isActive != true else { return }
         recordProjectUse(project)

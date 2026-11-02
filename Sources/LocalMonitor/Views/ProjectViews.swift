@@ -11,6 +11,8 @@ struct ProjectCardView: View {
     let cacheState: ProjectCacheState?
     var resourceState: ProjectResourceState? = nil
     var isInstalling = false
+    var nodeInstallation: ProjectNodeInstallationState? = nil
+    var nodeInstallDisabled = false
     let browserHostnames: [String]
     let onStart: () -> Void
     let onStop: () -> Void
@@ -21,6 +23,8 @@ struct ProjectCardView: View {
     let onCopyURL: () -> Void
     let onLogs: () -> Void
     let onWorkspaceApps: () -> Void
+    let onInstallNode: () -> Void
+    let onCancelNodeInstallation: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -60,7 +64,7 @@ struct ProjectCardView: View {
                         systemName: "arrow.clockwise",
                         help: "Restart",
                         tint: .orange,
-                        disabled: isInstalling || state.status == .starting || cleanRestartState?.isActive == true,
+                        disabled: isPreparing || state.status == .starting || cleanRestartState?.isActive == true,
                         action: onRestart
                     )
                 }
@@ -96,7 +100,7 @@ struct ProjectCardView: View {
                     operationState: cacheOperationState,
                     action: onCleanRestart
                 )
-                .disabled(isInstalling)
+                .disabled(isPreparing)
             }
 
             if isInstalling { Text("Installing dependencies…").font(.caption).foregroundStyle(.secondary) }
@@ -108,8 +112,14 @@ struct ProjectCardView: View {
                 }
             }
 
-            if let preflight, preflight.issues.contains(where: { $0.severity != .info }) {
-                Text(preflight.issues.filter { $0.severity != .info }.map(\.message).joined(separator: " · "))
+            ProjectNodeInstallationView(
+                requirement: preflight?.missingNodeRequirement, state: nodeInstallation,
+                disabled: nodeInstallDisabled || isPreparing || cleanRestartState?.isActive == true,
+                onInstall: onInstallNode, onCancel: onCancelNodeInstallation
+            )
+
+            if let preflight, preflight.issues.contains(where: { $0.severity != .info && $0.missingNode == nil }) {
+                Text(preflight.issues.filter { $0.severity != .info && $0.missingNode == nil }.map(\.message).joined(separator: " · "))
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(preflight.isClear ? .orange : .red)
                     .lineLimit(2)
@@ -183,7 +193,7 @@ struct ProjectCardView: View {
     }
 
     private var startDisabled: Bool {
-        if isInstalling { return true }
+        if isPreparing { return true }
         switch state.status {
         case .running, .warmingUp, .responseDelayed, .starting, .portMismatch, .noPort, .noResponse:
             return true
@@ -191,6 +201,8 @@ struct ProjectCardView: View {
             return cleanRestartState?.isActive == true
         }
     }
+
+    private var isPreparing: Bool { isInstalling || nodeInstallation?.isRunning == true }
 
     private var stopDisabled: Bool {
         switch state.status {

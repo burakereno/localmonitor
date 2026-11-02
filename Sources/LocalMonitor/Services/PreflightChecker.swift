@@ -38,6 +38,9 @@ struct PreflightChecker {
                 issues.append(PreflightIssue(severity: .error, message: "\(project.packageManager.displayName) not found"))
             }
             issues += try dependencyInstallation.issues(for: project, environment: environment)
+        } catch NodeRuntimeError.unavailable(let requirement) {
+            issues.append(PreflightIssue(severity: .error,
+                message: NodeRuntimeError.unavailable(requirement).localizedDescription, missingNode: requirement))
         } catch {
             issues.append(PreflightIssue(severity: .error, message: error.localizedDescription))
         }

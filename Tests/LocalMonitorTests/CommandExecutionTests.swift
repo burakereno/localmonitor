@@ -3,6 +3,13 @@ import Testing
 @testable import LocalMonitor
 
 struct CommandExecutionTests {
+    @Test func inheritsTheAppEnvironmentWhenNoOverrideIsSupplied() async throws {
+        let expected = try #require(ProcessInfo.processInfo.environment["HOME"])
+        let result = try await Shell.run("/usr/bin/printenv", arguments: ["HOME"])
+        #expect(result.status == 0)
+        #expect(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == expected)
+    }
+
     @Test func drainsLargeOutputWithoutUnboundedCaptureOrPipeDeadlock() async throws {
         let result = try await Shell.run("/bin/sh", arguments: ["-c", "yes output | head -c 200000; printf stderr >&2"],
                                           timeout: 3, maximumOutputBytes: 4_096)

@@ -155,6 +155,7 @@ struct ProjectNodeRuntimeResolver {
             ?? home.appendingPathComponent(".local/share/fnm")
         directories += children(fnm.appendingPathComponent("node-versions")).map { $0.appendingPathComponent("installation/bin") }
         for root in [location("NVM_DIR", ".nvm").appendingPathComponent("versions/node"),
+                     location("XDG_CONFIG_HOME", ".config").appendingPathComponent("nvm/versions/node"),
                      location("VOLTA_HOME", ".volta").appendingPathComponent("tools/image/node"),
                      location("MISE_DATA_DIR", ".local/share/mise").appendingPathComponent("installs/node"),
                      location("ASDF_DATA_DIR", ".asdf").appendingPathComponent("installs/nodejs")] {
@@ -180,7 +181,7 @@ struct ProjectNodeRuntimeResolver {
           fnm exec --using \(quoted) node -p 'process.execPath' 2>/dev/null && exit 0
         fi
         if ! command -v nvm >/dev/null 2>&1; then
-          for lm_nvm_script in "${NVM_DIR:-$HOME/.nvm}/nvm.sh" /opt/homebrew/opt/nvm/nvm.sh /usr/local/opt/nvm/nvm.sh; do
+          for lm_nvm_script in "${NVM_DIR:-$HOME/.nvm}/nvm.sh" "${XDG_CONFIG_HOME:-$HOME/.config}/nvm/nvm.sh" /opt/homebrew/opt/nvm/nvm.sh /usr/local/opt/nvm/nvm.sh; do
             if [ -r "$lm_nvm_script" ]; then . "$lm_nvm_script" --no-use; break; fi
           done
         fi

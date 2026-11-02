@@ -102,18 +102,30 @@ struct ProjectReliabilityDetailView: View {
             Text("Requirements & Diagnostics").font(.system(size: 12, weight: .bold))
             HStack {
                 Button("Check Requirements") { Task { await model.checkRequirements(for: project) } }
-                    .disabled(model.checkingProjects.contains(project.id) || model.installationTasks[project.id] != nil)
+                    .disabled(model.checkingProjects.contains(project.id) || model.installationTasks[project.id] != nil
+                        || model.isInstallingNode(for: project))
                 if project.kind != .supabase {
                     if model.installationTasks[project.id] != nil {
                         ProgressView().controlSize(.small)
                         Button("Cancel Install") { model.cancelInstallation(for: project) }
                     } else {
                         Button("Install Dependencies") { Task { await model.installDependencies(for: project) } }
-                            .disabled(![.stopped, .crashed, .portBusy].contains(model.runtimeState(for: project).status))
+                            .disabled(![.stopped, .crashed, .portBusy].contains(model.runtimeState(for: project).status)
+                                || model.isInstallingNode(for: project))
                             .help("Installs with the project's package manager. A matching manager version may be downloaded through Corepack.")
                     }
                 }
             }.controlSize(.small)
+            ProjectNodeInstallationView(
+                requirement: model.preflightResults[project.id]?.missingNodeRequirement,
+                state: model.nodeInstallationStates[project.id],
+                disabled: !model.nodeInstallationTasks.isEmpty || model.checkingProjects.contains(project.id)
+                    || model.isInstallingDependencies(for: project)
+                    || model.cleanRestartStates[project.id]?.isActive == true
+                    || ![.stopped, .crashed, .portBusy].contains(model.runtimeState(for: project).status),
+                onInstall: { Task { await model.installNode(for: project) } },
+                onCancel: { model.cancelNodeInstallation(for: project) }
+            )
             if let installation = model.installationStates[project.id] {
                 Text(installation.message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
             }

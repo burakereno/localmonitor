@@ -27,12 +27,21 @@ extension LocalMonitorModel {
         let result = await preflightChecker.check(project)
         guard projects.contains(where: { $0.id == project.id }), !Task.isCancelled else { return }
         preflightResults[project.id] = result
+        if !isInstallingNode(for: project) {
+            switch nodeInstallationStates[project.id] {
+            case .succeeded where result.missingNodeRequirement != nil,
+                 .failed where result.missingNodeRequirement == nil,
+                 .cancelled where result.missingNodeRequirement == nil:
+                nodeInstallationStates.removeValue(forKey: project.id)
+            default: break
+            }
+        }
     }
 
     func installDependencies(for project: LocalProject) async {
         let store = dependencyInstallation
         let root = store.folder(for: project)
-        guard !isInstallingDependencies(for: project) else { return }
+        guard !isInstallingDependencies(for: project), !isInstallingNode(for: project) else { return }
         let activeSibling = projects.contains { other in
             guard store.folder(for: other) == root else { return false }
             return ![.stopped, .crashed, .portBusy].contains(runtimeState(for: other).status)
@@ -233,6 +242,7 @@ extension LocalMonitorModel {
             dependencyLaunchTasks[root]?.cancel()
         }
         installationTasks[id]?.cancel()
+        nodeInstallationTasks[id]?.cancel()
         automaticRestartTasks.removeValue(forKey: id)?.cancel()
     }
 
@@ -247,6 +257,7 @@ extension LocalMonitorModel {
         stopVerificationTasks.removeAll()
         for task in dependencyLaunchTasks.values { task.cancel() }
         for task in installationTasks.values { task.cancel() }
+        for task in nodeInstallationTasks.values { task.cancel() }
         for task in automaticRestartTasks.values { task.cancel() }
         automaticRestartTasks.removeAll()
     }

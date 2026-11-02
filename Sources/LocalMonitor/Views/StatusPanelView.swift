@@ -216,6 +216,9 @@ struct StatusPanelView: View {
                 cacheState: model.cacheStates[project.id],
                 resourceState: model.resourceStates[project.id],
                 isInstalling: model.isInstallingDependencies(for: project),
+                nodeInstallation: model.nodeInstallationStates[project.id],
+                nodeInstallDisabled: !model.nodeInstallationTasks.isEmpty || model.checkingProjects.contains(project.id)
+                    || ![.stopped, .crashed, .portBusy].contains(model.runtimeState(for: project).status),
                 browserHostnames: model.browserHostnames(for: project)
             ) {
                 Task { await model.startProject(project) }
@@ -235,6 +238,10 @@ struct StatusPanelView: View {
                 model.selectedLogProjectID = project.id
             } onWorkspaceApps: {
                 model.showWorkspaceApps(for: project)
+            } onInstallNode: {
+                Task { await model.installNode(for: project) }
+            } onCancelNodeInstallation: {
+                model.cancelNodeInstallation(for: project)
             }
             .transition(.opacity.combined(with: .scale(scale: 0.985)))
         }

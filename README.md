@@ -106,7 +106,9 @@ Local Monitor selects the highest matching installed stable Node version. It dis
 
 The selected Node directory is applied after login-shell initialization to both the package-manager preflight check and the server command. Logs show the selected version, executable, and declaration file. Projects without a declaration keep their existing environment, and custom launch commands are preserved. Commands that explicitly replace PATH or invoke an absolute Node executable retain that explicit override.
 
-If the requested version is unavailable, Start reports the requirement and its source file. Install a matching version with your Node version manager, then start again. Local Monitor does not download runtimes, change global Node defaults, or edit shell configuration.
+If the requested version is unavailable, the project card and Requirements & Diagnostics show **Install Node.js**. Click once to download a matching runtime through an existing **fnm** or **nvm** installation. Exact pins install that version; ranges and standard LTS aliases select a matching stable release from the official Node.js release index. Installation shows progress, supports cancellation and retry, and automatically checks requirements afterwards. It does not start the project; press Start when ready. If neither manager is available, the error explains how to proceed.
+
+Ordinary Start and Check Requirements never download Node runtimes. Installation does not edit project pins or shell configuration, or explicitly change your Node manager's default version. Other installed Node versions remain available.
 
 ## Requirements, Services and Diagnostics
 

@@ -609,6 +609,10 @@ struct PreflightResult: Equatable {
     var issues: [PreflightIssue]
     var launchEnvironment: ProjectLaunchEnvironment? = nil
 
+    var missingNodeRequirement: ProjectNodeRequirement? {
+        issues.compactMap(\.missingNode).first
+    }
+
     var isClear: Bool {
         issues.allSatisfy { $0.severity != .error }
     }
@@ -629,6 +633,7 @@ struct PreflightIssue: Identifiable, Equatable {
     var id = UUID()
     var severity: Severity
     var message: String
+    var missingNode: ProjectNodeRequirement? = nil
 }
 
 struct CommandPreset: Identifiable, Equatable {

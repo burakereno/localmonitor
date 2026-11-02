@@ -56,7 +56,9 @@ enum Shell {
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.currentDirectoryURL = directory
-        process.environment = environment
+        // Assigning nil to NSTask.environment creates an empty child environment on macOS.
+        // Preserve manager locations (FNM_DIR/NVM_DIR) and other inherited settings by default.
+        process.environment = environment ?? ProcessInfo.processInfo.environment
         process.standardOutput = stdout
         process.standardError = stderr
         let descriptors = [stdout.fileHandleForReading.fileDescriptor, stderr.fileHandleForReading.fileDescriptor]
