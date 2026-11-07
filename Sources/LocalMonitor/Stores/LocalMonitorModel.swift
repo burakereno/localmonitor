@@ -91,6 +91,7 @@ final class LocalMonitorModel: ObservableObject {
     private let readinessCheckRefreshInterval: TimeInterval = 12
     private let projectIdentityRefreshInterval: TimeInterval = 60
     private let sessionContinuityGraceInterval: TimeInterval = 120
+    private let initialPortWaitInterval: TimeInterval = 90
 
     init(
         store: ProjectStore = ProjectStore(),
@@ -575,7 +576,7 @@ final class LocalMonitorModel: ObservableObject {
         guard maintenanceRequests[project.id] == request, !Task.isCancelled else { return }
 
         let state = runtimeState(for: project)
-        guard state.status == .running || state.status == .warmingUp || state.status == .responseDelayed || state.status == .portMismatch || state.status == .noPort else {
+        guard state.status == .starting || state.status == .running || state.status == .warmingUp || state.status == .responseDelayed || state.status == .portMismatch || state.status == .noPort else {
             let message = state.lastMessage ?? "Project did not start."
             setCleanRestartState(
                 for: project,
@@ -698,7 +699,7 @@ final class LocalMonitorModel: ObservableObject {
         }
 
         let state = runtimeState(for: project)
-        guard state.status == .running || state.status == .warmingUp || state.status == .responseDelayed || state.status == .portMismatch || state.status == .noPort else {
+        guard state.status == .starting || state.status == .running || state.status == .warmingUp || state.status == .responseDelayed || state.status == .portMismatch || state.status == .noPort else {
             let message = state.lastMessage ?? "Project did not start."
             setCleanRestartState(
                 for: project,
@@ -1710,9 +1711,7 @@ final class LocalMonitorModel: ObservableObject {
         }
     }
 
-    private func reconcileRunningStates() {
-        let now = Date()
-
+    func reconcileRunningStates(now: Date = Date()) {
         for project in projects {
             guard var state = runtimeStates[project.id] else {
                 runtimeStates[project.id] = .stopped
@@ -1724,15 +1723,19 @@ final class LocalMonitorModel: ObservableObject {
                     markRunning(project, owner: owner)
                 } else if let observed = matchingProjectProcessOwner(for: project) {
                     markPortMismatch(project, owner: observed)
-                } else if processManager.isRunning(projectId: project.id) {
+                } else if let pid = processManager.rootPID(for: project.id) {
                     state.ownership = .managed
-                    let elapsed = state.startedAt.map { Date().timeIntervalSince($0) } ?? 0
-                    if elapsed > 10 {
+                    let startedAt = state.startedAt ?? ProcessTree.startDate(of: pid) ?? now
+                    state.startedAt = startedAt
+                    state.observedPort = nil
+                    // A launch command can run preparatory scripts before starting its server.
+                    let waitInterval = state.lastSeenRunningAt == nil ? initialPortWaitInterval : 10
+                    if now.timeIntervalSince(startedAt) >= waitInterval {
                         state.status = .noPort
-                        state.observedPort = nil
                         state.lastMessage = "Process is alive, but no listening port opened for \(project.port)."
                     } else {
                         state.status = .starting
+                        state.lastMessage = "Waiting for \(project.localAuthority) to open."
                     }
                     runtimeStates[project.id] = state
                 } else if projectLaunchRequests[project.id] != nil || dependencyLaunchTasks[project.id] != nil {
@@ -1841,6 +1844,7 @@ final class LocalMonitorModel: ObservableObject {
             state.pid = pid
         }
         if let startedAt {
+            state.clearSessionTiming()
             state.startedAt = startedAt
         }
         if status == .stopped || status == .starting || status == .portBusy || status == .crashed {

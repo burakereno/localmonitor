@@ -3,6 +3,33 @@ import Testing
 @testable import LocalMonitor
 
 struct ProjectLaunchLifecycleTests {
+    @Test(arguments: [false, true])
+    @MainActor func slowLaunchWarnsOnlyAfterTheFirstPortDeadline(_ restart: Bool) async throws {
+        let fixture = try LaunchLifecycleFixture(delay: 0)
+        defer { fixture.cleanup() }
+        let project = fixture.project()
+        let model = fixture.model(projects: [project])
+        defer { model.stopAllProjects() }
+
+        if restart {
+            await model.restartProject(project)
+            #expect(model.cleanRestartStates[project.id]?.phase == .done)
+        } else {
+            await model.startProject(project)
+        }
+        try #require(model.processManager.isRunning(projectId: project.id))
+        let startedAt = try #require(model.runtimeState(for: project).startedAt)
+
+        model.reconcileRunningStates(now: startedAt.addingTimeInterval(56))
+        #expect(model.runtimeState(for: project).status == .starting)
+
+        model.reconcileRunningStates(now: startedAt.addingTimeInterval(89))
+        #expect(model.runtimeState(for: project).status == .starting)
+
+        model.reconcileRunningStates(now: startedAt.addingTimeInterval(90))
+        #expect(model.runtimeState(for: project).status == .noPort)
+    }
+
     @Test @MainActor func stopDuringRestartPreventsTheLaterStart() async throws {
         let fixture = try LaunchLifecycleFixture(delay: 0); defer { fixture.cleanup() }
         let project = fixture.project()
