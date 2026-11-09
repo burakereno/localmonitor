@@ -34,6 +34,15 @@ extension View {
     func localCardBackground(cornerRadius: CGFloat = 10) -> some View {
         modifier(CardBackground(cornerRadius: cornerRadius))
     }
+
+    func metadataChipStyle(fill: Color) -> some View {
+        padding(.horizontal, 7)
+            .frame(height: 21)
+            .background {
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(fill)
+            }
+    }
 }
 
 struct IconActionButton: View {
@@ -139,12 +148,7 @@ struct MetadataChip: View {
                 .lineLimit(1)
         }
         .foregroundStyle(tint)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 4)
-        .background {
-            RoundedRectangle(cornerRadius: 5)
-                .fill(tint.opacity(0.10))
-        }
+        .metadataChipStyle(fill: tint.opacity(0.10))
         .help(help ?? text)
     }
 }

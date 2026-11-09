@@ -448,12 +448,7 @@ struct UptimeChipView: View {
                     .lineLimit(1)
             }
             .foregroundStyle(uptimeTint)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 4)
-            .background {
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(uptimeTint.opacity(0.10))
-            }
+            .metadataChipStyle(fill: uptimeTint.opacity(0.10))
             .help(helpText(elapsed: elapsed, uptimeText: uptimeText))
         }
     }
@@ -816,12 +811,7 @@ struct ProjectKindChip: View {
             }
         }
         .foregroundStyle(.primary)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 4)
-        .background {
-            RoundedRectangle(cornerRadius: 5)
-                .fill(Color.primary.opacity(0.055))
-        }
+        .metadataChipStyle(fill: Color.primary.opacity(0.055))
     }
 }
 
