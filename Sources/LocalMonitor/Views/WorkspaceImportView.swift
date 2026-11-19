@@ -71,7 +71,7 @@ private struct WorkspaceAppLabelView: View {
                 }
             }
             Text(profile.relativePath).font(.caption).foregroundStyle(.secondary)
-            Text("\(profile.detection.kind.displayName) · \(savedProject?.hostname ?? profile.detection.hostname):\(savedProject?.port ?? profile.detection.defaultPort)")
+            Text("\(profile.detection.kind.displayName) · \(savedProject?.hostname ?? profile.detection.hostname):\(String(savedProject?.port ?? profile.detection.defaultPort))")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

@@ -36,7 +36,7 @@ struct DashboardWindowView: View {
                                     Text(project.displayName)
                                         .font(.system(size: 13, weight: .bold))
 
-                                    Text("\(project.kind.displayName) · :\(project.port) · \(model.projectIdentities[project.id]?.branch ?? "no branch")")
+                                    Text("\(project.kind.displayName) · :\(String(project.port)) · \(model.projectIdentities[project.id]?.branch ?? "no branch")")
                                         .font(.system(size: 11, weight: .medium))
                                         .foregroundStyle(.secondary)
                                 }

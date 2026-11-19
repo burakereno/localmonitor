@@ -12,10 +12,11 @@ struct ProjectReliabilityMonitoringTests {
         #expect(ProjectFailureDiagnosis.classify(logs: ["npm WARN EBADENGINE Unsupported engine {", "required: { node: '>=24' }"], exitCode: 1).kind == .node)
     }
 
-    @Test func aggregatesDescendantsWithoutDoubleCountingOrIncludingOtherProjects() {
+    @Test func aggregatesDescendantsWithoutDoubleCountingOrIncludingOtherProjects() throws {
         let sampler = ProjectResourceSampler()
         let entries = sampler.entries(from: "2 1 2.5 1024\n3 2 4.5 2048\n4 3 1.0 1024\n5 1 99 99999\n6 1 nan 1024\n7 1 1 -1")
-        let total = sampler.aggregate(roots: [2, 3], entries: entries)
+        let id = UUID()
+        let total = try #require(sampler.samples(for: [id: [2, 3]], entries: entries)[id])
         #expect(total.cpuPercent == 8)
         #expect(total.memoryBytes == 4 * 1_048_576)
         #expect(total.processCount == 3)

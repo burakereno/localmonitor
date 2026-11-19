@@ -86,6 +86,43 @@ final class ProjectDetectorTests: XCTestCase {
         XCTAssertEqual(result.commandTemplate, "pnpm dev --host 0.0.0.0 --port {port}")
     }
 
+    func testSvelteKitTakesPrecedenceOverItsViteDependency() throws {
+        let folder = try makeTempProject(files: [
+            "package.json": #"{"scripts":{"dev":"vite dev"},"devDependencies":{"@sveltejs/kit":"2","vite":"7"}}"#
+        ])
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let detection = ProjectDetector.detect(folderURL: folder)
+        XCTAssertEqual(detection.kind, .sveltekit)
+        let legacy = LocalProject(name: "web", path: folder.path, kind: .vite, packageManager: .npm,
+                                  port: 5173, commandTemplate: detection.commandTemplate)
+        XCTAssertEqual(ProjectDetector.repairDetectedDefaults(in: legacy).kind, .sveltekit)
+    }
+
+    func testExpoWithOnlyAStartScriptRepairsOnlyTheGeneratedTemplate() throws {
+        let folder = try makeTempProject(files: [
+            "package.json": #"{"scripts":{"start":"expo start"},"dependencies":{"expo":"latest"}}"#
+        ])
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let detection = ProjectDetector.detect(folderURL: folder)
+        XCTAssertEqual(detection.commandTemplate, "EXPO_DEVTOOLS_LISTEN_ADDRESS=0.0.0.0 PORT={port} npm run start")
+        var saved = LocalProject(name: "mobile", path: folder.path, kind: .expo, packageManager: .npm, port: 8081,
+                                 commandTemplate: "EXPO_DEVTOOLS_LISTEN_ADDRESS=0.0.0.0 PORT={port} npm run dev")
+        XCTAssertEqual(ProjectDetector.repairDetectedDefaults(in: saved).commandTemplate, detection.commandTemplate)
+        saved.commandTemplate = "npx expo start --offline"
+        XCTAssertEqual(ProjectDetector.repairDetectedDefaults(in: saved), saved)
+    }
+
+    func testSwitchingManagersPreservesEnvironmentAndPassesScriptArguments() {
+        XCTAssertEqual(ProjectDetector.switchPackageManager(in: "PORT={port} npm run dev", from: .npm, to: .pnpm),
+                       "PORT={port} pnpm dev")
+        XCTAssertEqual(ProjectDetector.switchPackageManager(in: "EXPO_DEVTOOLS_LISTEN_ADDRESS=0.0.0.0 PORT={port} yarn start",
+                                                            from: .yarn, to: .bun),
+                       "EXPO_DEVTOOLS_LISTEN_ADDRESS=0.0.0.0 PORT={port} bun run start")
+        XCTAssertEqual(ProjectDetector.switchPackageManager(in: "npm run storybook -- -p {port}", from: .npm, to: .pnpm),
+                       "pnpm run storybook -p {port}")
+        XCTAssertEqual(ProjectDetector.switchPackageManager(in: "node custom.mjs", from: .npm, to: .pnpm), "node custom.mjs")
+    }
+
     func testNormalizesLegacyPnpmDoubleDashCommandTemplate() {
         XCTAssertEqual(
             ProjectDetector.normalizeCommandTemplate(

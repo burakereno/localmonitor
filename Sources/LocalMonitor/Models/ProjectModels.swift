@@ -297,6 +297,9 @@ struct LocalProject: Identifiable, Codable, Equatable {
         kind = try container.decodeIfPresent(ProjectKind.self, forKey: .kind) ?? .unknown
         packageManager = try container.decodeIfPresent(PackageManager.self, forKey: .packageManager) ?? .npm
         port = try container.decode(Int.self, forKey: .port)
+        guard (1...65_535).contains(port) else {
+            throw DecodingError.dataCorruptedError(forKey: .port, in: container, debugDescription: "Invalid TCP port.")
+        }
         commandTemplate = try container.decode(String.self, forKey: .commandTemplate)
         healthPath = try container.decodeIfPresent(String.self, forKey: .healthPath) ?? "/"
         hostname = LocalHostname.normalize(try container.decodeIfPresent(String.self, forKey: .hostname) ?? "localhost") ?? "localhost"

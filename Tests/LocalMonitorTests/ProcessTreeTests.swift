@@ -20,6 +20,9 @@ final class ProcessTreeTests: XCTestCase {
         XCTAssertTrue(Self.isAlive(process.processIdentifier))
         XCTAssertTrue(Self.isAlive(childPID))
 
+        let birth = try XCTUnwrap(ProcessTree.startDate(of: process.processIdentifier))
+        XCTAssertTrue(ProcessTree.requestTermination(of: process.processIdentifier, startedAt: birth.addingTimeInterval(-1)).isEmpty)
+        XCTAssertTrue(Self.isAlive(childPID))
         ProcessTree.terminate(pid: process.processIdentifier)
 
         XCTAssertTrue(waitUntil(timeout: 3) { !process.isRunning })

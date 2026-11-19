@@ -43,27 +43,11 @@ final class PortScannerTests: XCTestCase {
         XCTAssertNil(name)
     }
 
-    func testParsesMacOSProcessStartDate() throws {
-        let date = try XCTUnwrap(PortScanner.parseProcessStartDate("Sun Jun 21 23:16:07 2026    "))
-        let components = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
-
-        XCTAssertEqual(components.year, 2026)
-        XCTAssertEqual(components.month, 6)
-        XCTAssertEqual(components.day, 21)
-        XCTAssertEqual(components.hour, 23)
-        XCTAssertEqual(components.minute, 16)
-        XCTAssertEqual(components.second, 7)
-    }
-
-    func testParsesMacOSProcessStartDateWithPaddedDay() throws {
-        let date = try XCTUnwrap(PortScanner.parseProcessStartDate("Mon Jun  1 09:04:03 2026"))
-        let components = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
-
-        XCTAssertEqual(components.year, 2026)
-        XCTAssertEqual(components.month, 6)
-        XCTAssertEqual(components.day, 1)
-        XCTAssertEqual(components.hour, 9)
-        XCTAssertEqual(components.minute, 4)
-        XCTAssertEqual(components.second, 3)
+    func testKernelStartDateIdentifiesTheSameProcessAcrossReads() throws {
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let birth = try XCTUnwrap(ProcessTree.startDate(of: pid))
+        XCTAssertLessThanOrEqual(birth, Date())
+        XCTAssertEqual(ProcessTree.startDate(of: pid), birth)
+        XCTAssertNil(ProcessTree.startDate(of: -1))
     }
 }

@@ -26,5 +26,14 @@ struct PortScannerResultTests {
         """
         let ports = try PortScanner.ports(from: ShellResult(status: 1, stdout: output, stderr: "lsof: warning"))
         #expect(ports.map(\.port) == [3010])
+        #expect(throws: PortScannerError.self) {
+            try PortScanner.ports(from: ShellResult(status: 1, stdout: output, stderr: "lsof: warning"), requireComplete: true)
+        }
+        #expect(throws: PortScannerError.self) {
+            try PortScanner.ports(from: ShellResult(status: 124, stdout: output, stderr: "timed out"))
+        }
+        #expect(throws: PortScannerError.self) {
+            try PortScanner.ports(from: ShellResult(status: 0, stdout: output + "\n[Output truncated]", stderr: ""), requireComplete: true)
+        }
     }
 }

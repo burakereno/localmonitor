@@ -10,7 +10,7 @@ struct ProjectBrowserButtonView: View {
         if hostnames.count > 1 {
             Menu {
                 ForEach(hostnames, id: \.self) { host in
-                    Button("\(host == "::1" ? "[::1]" : host):\(port)") {
+                    Button("\(host == "::1" ? "[::1]" : host):\(String(port))") {
                         onOpenHostname(host)
                     }
                 }

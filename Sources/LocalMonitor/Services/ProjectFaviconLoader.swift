@@ -3,10 +3,28 @@ import Foundation
 
 struct ProjectFaviconLoader {
     typealias Fetch = (URLRequest) async throws -> (Data, URLResponse)
-    private let fetch: Fetch
+    private let fetch: (URLRequest, Int) async throws -> (Data, URLResponse)
 
-    init(fetch: @escaping Fetch = { try await URLSession.shared.data(for: $0) }) {
-        self.fetch = fetch
+    init() {
+        fetch = Self.fetchLimited
+    }
+
+    init(fetch: @escaping Fetch) {
+        self.fetch = { request, _ in try await fetch(request) }
+    }
+
+    private static func fetchLimited(_ request: URLRequest, limit: Int) async throws -> (Data, URLResponse) {
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        defer { bytes.task.cancel() }
+        guard isSuccessful(response), response.expectedContentLength <= Int64(limit) else {
+            throw URLError(.badServerResponse)
+        }
+        var data = Data()
+        for try await byte in bytes {
+            guard data.count < limit else { throw URLError(.dataLengthExceedsMaximum) }
+            data.append(byte)
+        }
+        return (data, response)
     }
 
     @MainActor
@@ -16,7 +34,7 @@ struct ProjectFaviconLoader {
         do {
             var pageRequest = Self.request(for: pageURL)
             pageRequest.setValue("text/html", forHTTPHeaderField: "Accept")
-            let (data, response) = try await fetch(pageRequest)
+            let (data, response) = try await fetch(pageRequest, 512_000)
             guard !Task.isCancelled, Self.isSuccessful(response), data.count <= 512_000 else { return nil }
 
             var documentURL = response.url ?? pageURL
@@ -32,7 +50,7 @@ struct ProjectFaviconLoader {
             for iconURL in Self.iconURLs(in: html, pageURL: documentURL).prefix(6) {
                 guard !Task.isCancelled else { return nil }
                 do {
-                    let (iconData, iconResponse) = try await fetch(Self.request(for: iconURL))
+                    let (iconData, iconResponse) = try await fetch(Self.request(for: iconURL), 2_000_000)
                     guard !Task.isCancelled, Self.isSuccessful(iconResponse), iconData.count <= 2_000_000,
                           let image = NSImage(data: iconData), image.size.width > 0, image.size.height > 0 else {
                         continue

@@ -97,12 +97,6 @@ enum ProjectDetector {
             return .hono
         }
 
-        if dependencies.contains("vite") || fileExists("vite.config.ts", in: folderURL)
-            || fileExists("vite.config.js", in: folderURL)
-            || fileExists("vite.config.mjs", in: folderURL) {
-            return .vite
-        }
-
         if dependencies.contains("astro") || fileExists("astro.config.mjs", in: folderURL)
             || fileExists("astro.config.ts", in: folderURL) {
             return .astro
@@ -120,6 +114,12 @@ enum ProjectDetector {
         if dependencies.contains("nuxt") || fileExists("nuxt.config.ts", in: folderURL)
             || fileExists("nuxt.config.js", in: folderURL) {
             return .nuxt
+        }
+
+        if dependencies.contains("vite") || fileExists("vite.config.ts", in: folderURL)
+            || fileExists("vite.config.js", in: folderURL)
+            || fileExists("vite.config.mjs", in: folderURL) {
+            return .vite
         }
 
         if dependencies.contains("expo") || fileExists("app.json", in: folderURL)
@@ -200,7 +200,7 @@ enum ProjectDetector {
             let base = hasDev ? packageManager.devCommand : (hasStart ? packageManager.startCommand : packageManager.devCommand)
             return "PORT={port} \(base)"
         case .expo:
-            let base = hasDev ? packageManager.devCommand : packageManager.devCommand
+            let base = !hasDev && hasStart ? packageManager.startCommand : packageManager.devCommand
             return "EXPO_DEVTOOLS_LISTEN_ADDRESS=0.0.0.0 PORT={port} \(base)"
         case .supabase:
             return "supabase start"
@@ -214,6 +214,40 @@ enum ProjectDetector {
             let base = hasDev ? packageManager.devCommand : (hasStart ? packageManager.startCommand : packageManager.devCommand)
             return "PORT={port} \(base)"
         }
+    }
+
+    static func repairDetectedDefaults(in project: LocalProject) -> LocalProject {
+        guard project.kind == .vite || project.kind == .expo,
+              let package = readPackageJSON(in: project.folderURL) else { return project }
+        var updated = project
+        if project.kind == .vite,
+           detectKind(folderURL: project.folderURL, dependencies: package.allDependencies) == .sveltekit,
+           project.commandTemplate == detectCommandTemplate(package: package, kind: .vite, packageManager: project.packageManager) {
+            updated.kind = .sveltekit
+        } else if project.kind == .expo, package.scripts["dev"] == nil, package.scripts["start"] != nil,
+                  project.commandTemplate == "EXPO_DEVTOOLS_LISTEN_ADDRESS=0.0.0.0 PORT={port} \(project.packageManager.devCommand)" {
+            updated.commandTemplate = detectCommandTemplate(package: package, kind: .expo, packageManager: project.packageManager)
+        }
+        if project != updated { updated.updatedAt = Date() }
+        return updated
+    }
+
+    static func switchPackageManager(in template: String, from previous: PackageManager, to next: PackageManager) -> String {
+        guard previous != next else { return template }
+        let prefixes = ["PORT={port} ", "EXPO_DEVTOOLS_LISTEN_ADDRESS=0.0.0.0 PORT={port} "]
+        let prefix = prefixes.first(where: { template.hasPrefix($0) }) ?? ""
+        let command = String(template.dropFirst(prefix.count))
+        let scripts = [
+            (previous.devCommand, next.devCommand),
+            (previous.startCommand, next.startCommand),
+            ("\(previous.rawValue) run storybook", "\(next.rawValue) run storybook")
+        ]
+        for (old, new) in scripts where command == old || command.hasPrefix(old + " ") {
+            var arguments = String(command.dropFirst(old.count)).trimmingCharacters(in: .whitespaces)
+            if previous == .npm, arguments.hasPrefix("-- ") { arguments = String(arguments.dropFirst(3)) }
+            return prefix + new + next.scriptArguments(arguments)
+        }
+        return template
     }
 
     static func normalizeCommandTemplate(_ commandTemplate: String, packageManager: PackageManager) -> String {
@@ -270,7 +304,7 @@ enum ProjectDetector {
             presets.append(CommandPreset(
                 title: "Storybook",
                 kind: .storybook,
-                commandTemplate: "\(packageManager.rawValue) run storybook -- -p {port}",
+                commandTemplate: "\(packageManager.rawValue) run storybook\(packageManager.scriptArguments("-p {port}"))",
                 port: 6006,
                 healthPath: "/"
             ))

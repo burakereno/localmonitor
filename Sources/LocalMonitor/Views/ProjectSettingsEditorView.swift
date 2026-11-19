@@ -44,7 +44,7 @@ struct ProjectSettingsEditorView: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Text("\(port.wrappedValue)")
+                    Text(verbatim: String(port.wrappedValue))
                         .font(.system(size: 11, weight: .bold, design: .monospaced))
                 }
             }

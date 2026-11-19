@@ -80,9 +80,15 @@ struct ProjectResourceSampler {
         }
     }
 
-    func aggregate(roots: Set<Int32>, entries: [Entry], at date: Date = Date()) -> ProjectResourceSample {
+    func samples(for roots: [UUID: Set<Int32>], entries: [Entry], at date: Date = Date()) -> [UUID: ProjectResourceSample] {
         let byPID = Dictionary(entries.map { ($0.pid, $0) }, uniquingKeysWith: { a, _ in a })
         let byParent = Dictionary(grouping: entries, by: \.parent)
+        return roots.mapValues { pids in
+            aggregate(roots: pids, byPID: byPID, byParent: byParent, at: date)
+        }
+    }
+
+    private func aggregate(roots: Set<Int32>, byPID: [Int32: Entry], byParent: [Int32: [Entry]], at date: Date) -> ProjectResourceSample {
         var pending = Array(roots), visited = Set<Int32>()
         var cpu = 0.0, memory: Int64 = 0
         while let pid = pending.popLast(), visited.count < 16_384 {
@@ -95,12 +101,12 @@ struct ProjectResourceSampler {
                                      processCount: visited.filter { byPID[$0] != nil }.count)
     }
 
-    func snapshot() async throws -> [Entry] {
+    func snapshot(for roots: [UUID: Set<Int32>]) async throws -> [UUID: ProjectResourceSample] {
         var environment = ProcessInfo.processInfo.environment
         environment["LC_ALL"] = "C"
         let result = try await Shell.run("/bin/ps", arguments: ["-axo", "pid=,ppid=,%cpu=,rss="],
                                          timeout: 3, environment: environment, maximumOutputBytes: 1_048_576)
         guard result.status == 0 else { throw ProjectReliabilityError.message("Process resource measurements are temporarily unavailable.") }
-        return entries(from: result.stdout)
+        return samples(for: roots, entries: entries(from: result.stdout))
     }
 }

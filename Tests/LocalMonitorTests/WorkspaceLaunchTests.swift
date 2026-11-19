@@ -177,12 +177,6 @@ final class WorkspaceLaunchTests: XCTestCase {
         try fixture.write("apps/theme-preview/package.json", """
         {"name":"@meetcase-site/theme-preview","scripts":{"dev":"next dev --port \(runningPort)"},"dependencies":{"next":"16.3.8"}}
         """)
-        let savedScanning = UserDefaults.standard.object(forKey: AppPreference.scanExternalPortsKey)
-        UserDefaults.standard.set(true, forKey: AppPreference.scanExternalPortsKey)
-        defer {
-            if let savedScanning { UserDefaults.standard.set(savedScanning, forKey: AppPreference.scanExternalPortsKey) }
-            else { UserDefaults.standard.removeObject(forKey: AppPreference.scanExternalPortsKey) }
-        }
         var mira = ProjectLaunchMigration.migrate(fixture.legacyProject())
         mira.port = 3300
         mira.commandTemplate = "PORT={port} node custom.mjs"
@@ -209,6 +203,15 @@ final class WorkspaceLaunchTests: XCTestCase {
         XCTAssertEqual(model.projects.count, 2)
         XCTAssertTrue(external.isRunning)
         XCTAssertEqual(model.browserURL(for: theme, hostname: "luma.localhost")?.port, runningPort)
+
+        let standaloneStore = ProjectStore(storageDirectoryURL: fixture.root.appendingPathComponent("standalone-store"))
+        let standalone = LocalMonitorModel(store: standaloneStore, healthChecksEnabled: false,
+                                           notificationService: NotificationService(isEnabled: { false }), userDefaults: defaults)
+        await standalone.addProject(folderURL: app)
+        let imported = try XCTUnwrap(standalone.projects.first)
+        XCTAssertEqual(imported.port, runningPort)
+        XCTAssertEqual(standalone.runtimeState(for: imported).pid, originalPID)
+        XCTAssertTrue(external.isRunning)
     }
 
     @MainActor

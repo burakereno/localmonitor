@@ -34,18 +34,18 @@ final class ProjectFaviconRefreshTests: XCTestCase {
         let model = LocalMonitorModel(store: store, userDefaults: defaults)
 
         try faviconData(color: .systemRed).write(to: faviconURL, options: .atomic)
-        let originalAvatar = try renderAvatar(for: project)
+        let originalAvatar = try renderAvatar(for: project, cache: model.iconCache)
 
         try faviconData(color: .systemBlue).write(to: faviconURL, options: .atomic)
         await model.refresh()
-        let refreshedAvatar = try renderAvatar(for: project)
+        let refreshedAvatar = try renderAvatar(for: project, cache: model.iconCache)
 
         XCTAssertNotEqual(originalAvatar, refreshedAvatar)
     }
 
     @MainActor
-    private func renderAvatar(for project: LocalProject) throws -> Data {
-        let renderer = ImageRenderer(content: ProjectAvatarView(project: project, tint: .blue))
+    private func renderAvatar(for project: LocalProject, cache: ProjectIconCache) throws -> Data {
+        let renderer = ImageRenderer(content: ProjectAvatarView(project: project, tint: .blue).environmentObject(cache))
         renderer.scale = 2
         return try XCTUnwrap(renderer.nsImage?.tiffRepresentation)
     }

@@ -72,7 +72,7 @@ struct ProjectCardView: View {
 
             HStack(spacing: 6) {
                 ProjectKindChip(kind: project.kind)
-                MetadataChip(icon: "number", text: "\(project.port)")
+                MetadataChip(icon: "number", text: String(project.port))
                 if let branch = identity?.branch {
                     MetadataChip(icon: "arrow.triangle.branch", text: branch)
                 }
@@ -126,7 +126,7 @@ struct ProjectCardView: View {
             }
 
             if let conflict {
-                Text("Port \(project.port) is used by \(conflict.displayOwner).")
+                Text("Port \(String(project.port)) is used by \(conflict.displayOwner).")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.orange)
                     .lineLimit(2)
@@ -138,7 +138,7 @@ struct ProjectCardView: View {
             }
 
             if state.status == .portMismatch, let observedPort = state.observedPort {
-                Text("Expected \(project.port), running on \(observedPort).")
+                Text("Expected \(String(project.port)), running on \(String(observedPort)).")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.orange)
                     .lineLimit(2)
@@ -761,7 +761,7 @@ struct ProjectAvatarView: View {
     let project: LocalProject
     let tint: Color
     var size: CGFloat = 24
-    @ObservedObject private var iconCache = ProjectIconCache.shared
+    @EnvironmentObject private var iconCache: ProjectIconCache
 
     var body: some View {
         ZStack {
@@ -870,11 +870,13 @@ final class ProjectIconCache: ObservableObject {
         return image
     }
 
-    func refreshFavicons(for projects: [LocalProject]) {
-        let projectPaths = Set(projects.map(\.path))
-        faviconCache = faviconCache.filter { projectPaths.contains($0.key) }
-        siteFavicons = siteFavicons.filter { projectPaths.contains($0.key) }
-        faviconStore.retainImages(for: projectPaths)
+    func refreshFavicons(for projects: [LocalProject], pruneMissing: Bool = true) {
+        if pruneMissing {
+            let projectPaths = Set(projects.map(\.path))
+            faviconCache = faviconCache.filter { projectPaths.contains($0.key) }
+            siteFavicons = siteFavicons.filter { projectPaths.contains($0.key) }
+            faviconStore.retainImages(for: projectPaths)
+        }
 
         var didChange = false
 

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 enum PortKillerError: LocalizedError {
@@ -12,32 +13,16 @@ enum PortKillerError: LocalizedError {
 }
 
 struct PortKiller {
-    func stop(pid: Int32) async throws {
-        let term = try await Shell.run("/bin/kill", arguments: ["-TERM", "\(pid)"])
-        if term.status != 0 {
-            let message = term.stderr.nilIfBlank ?? term.stdout.nilIfBlank ?? "kill exited with \(term.status)"
-            if message.localizedCaseInsensitiveContains("No such process") {
-                return
-            }
-            throw PortKillerError.failed(pid: pid, message: message)
-        }
-
-        try? await Task.sleep(nanoseconds: 800_000_000)
-
-        let probe = try await Shell.run("/bin/kill", arguments: ["-0", "\(pid)"])
-        guard probe.status == 0 else { return }
-
-        let kill = try await Shell.run("/bin/kill", arguments: ["-KILL", "\(pid)"])
-        if kill.status != 0 {
-            let message = kill.stderr.nilIfBlank ?? kill.stdout.nilIfBlank ?? "kill exited with \(kill.status)"
-            throw PortKillerError.failed(pid: pid, message: message)
-        }
+    func stop(pid: Int32, startedAt: Date) async throws {
+        try signal(SIGTERM, pid: pid, startedAt: startedAt)
+        try await Task.sleep(for: .milliseconds(800))
+        try signal(SIGKILL, pid: pid, startedAt: startedAt)
     }
-}
 
-private extension String {
-    var nilIfBlank: String? {
-        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+    private func signal(_ signal: Int32, pid: Int32, startedAt: Date) throws {
+        guard ProcessTree.startDate(of: pid) == startedAt else { return }
+        if Darwin.kill(pid, signal) != 0, errno != ESRCH {
+            throw PortKillerError.failed(pid: pid, message: String(cString: strerror(errno)))
+        }
     }
 }

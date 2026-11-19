@@ -33,9 +33,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UpdateChecker.shared.start()
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        model.shutdown()
+        guard model.processManager.hasPendingTerminations else { return .terminateNow }
+        Task {
+            await model.processManager.waitForTerminations()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         DockIconController.shared.stop()
         UpdateChecker.shared.stop()
-        model.shutdown()
+        model.stop()
     }
 }

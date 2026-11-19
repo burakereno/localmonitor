@@ -161,23 +161,22 @@ extension LocalMonitorModel {
     func refreshResourceMeasurements() async {
         var roots: [UUID: Set<Int32>] = [:]
         for project in projects {
-            let state = runtimeState(for: project)
             if let pid = processManager.rootPID(for: project.id) { roots[project.id, default: []].insert(pid) }
-            else if let pid = state.pid { roots[project.id, default: []].insert(pid) }
-            for port in discoveredPorts where port.projectId == project.id { roots[project.id, default: []].insert(port.pid) }
+        }
+        for port in discoveredPorts {
+            if let id = port.projectId { roots[id, default: []].insert(port.pid) }
         }
         let valid = Set(projects.map(\.id))
         resourceStates = resourceStates.filter { valid.contains($0.key) }
         for id in resourceStates.keys where roots[id] == nil { resourceStates[id]?.warning = nil }
         guard !roots.isEmpty else { return }
         let sampler = ProjectResourceSampler()
-        guard let snapshot = try? await sampler.snapshot(), !Task.isCancelled else { return }
+        guard let samples = try? await sampler.snapshot(for: roots), !Task.isCancelled else { return }
+        let alerts = ProjectResourceAlertPreferences.load(from: defaults)
         for project in projects {
-            guard let pids = roots[project.id] else { continue }
-            let sample = sampler.aggregate(roots: pids, entries: snapshot)
+            guard let sample = samples[project.id], sample.processCount > 0 else { continue }
             var state = resourceStates[project.id] ?? ProjectResourceState()
-            let warning = state.record(sample, settings: project.reliability,
-                                       alerts: .load(from: defaults))
+            let warning = state.record(sample, settings: project.reliability, alerts: alerts)
             resourceStates[project.id] = state
             if let warning {
                 notificationService.notify(title: "\(project.displayName) resource usage", body: warning)

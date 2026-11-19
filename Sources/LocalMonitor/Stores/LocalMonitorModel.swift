@@ -55,22 +55,32 @@ final class LocalMonitorModel: ObservableObject {
     @Published private(set) var discoveredPorts: [DiscoveredPort] = []
     @Published private(set) var pinnedPortNames: [Int: String] = [:]
     @Published private(set) var ignoredPorts: Set<Int> = []
-    @Published private(set) var pendingKillPortID: String?
+    @Published private var pendingKillPort: DiscoveredPort?
+    var pendingKillPortID: String? { pendingKillPort?.id }
     @Published private(set) var cleanRestartStates: [UUID: CleanRestartState] = [:]
     @Published private(set) var cacheStates: [UUID: ProjectCacheState] = [:]
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastUpdated: Date?
-    @Published private(set) var lastError: String?
+    @Published private var operationError: String?
+    @Published private var scanError: String?
+    var lastError: String? { operationError ?? scanError ?? store.saveIssue ?? store.loadIssue }
     @Published private(set) var menuBarTitle = MenuBarTitle(
         runningCount: 0,
         totalCount: 0,
         externalCount: 0,
         displayMode: .count
     )
-    @Published var selectedLogProjectID: UUID?
+    @Published var selectedLogProjectID: UUID? {
+        didSet {
+            if selectedLogProjectID != oldValue { Task { await refreshSelectedLog() } }
+        }
+    }
+    private let logReader = ProjectLogReader()
+    private var logRevision = 0
 
+    let iconCache: ProjectIconCache
     private let store: ProjectStore
-    private let portScanner: PortScanner
+    private let portScanner: any PortScanning
     private let portKiller: PortKiller
     private let projectInspector: ProjectInspector
     let preflightChecker: PreflightChecker
@@ -78,10 +88,19 @@ final class LocalMonitorModel: ObservableObject {
     let notificationService: NotificationService
     let processManager: ProjectProcessManager
     let defaults: UserDefaults
+    private var refreshCycle: Task<Void, Never>?
+    private struct RefreshRequest {
+        let includesExternalPorts: Bool
+        let completion: CheckedContinuation<[DiscoveredPort]?, Never>
+    }
+    private var refreshRequests: [RefreshRequest] = []
+    private var cleaningFolders: Set<String> = []
+    private var healthRefreshTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
     private var cacheSizeTask: Task<Void, Never>?
     private var projectPanel: NSOpenPanel?
     private var workspaceImportController: WorkspaceImportWindowController?
+    private var pendingBrowserOpens = Set<UUID>()
     private var lastHealthStates: [UUID: HealthState] = [:]
     private var lastReadinessCheckDates: [UUID: Date] = [:]
     private var readinessCheckIDs: [UUID: UUID] = [:]
@@ -95,7 +114,7 @@ final class LocalMonitorModel: ObservableObject {
 
     init(
         store: ProjectStore = ProjectStore(),
-        portScanner: PortScanner = PortScanner(),
+        portScanner: any PortScanning = PortScanner(),
         portKiller: PortKiller = PortKiller(),
         projectInspector: ProjectInspector = ProjectInspector(),
         preflightChecker: PreflightChecker = PreflightChecker(),
@@ -106,6 +125,9 @@ final class LocalMonitorModel: ObservableObject {
         userDefaults: UserDefaults = .standard
     ) {
         self.store = store
+        self.iconCache = store.storageDirectoryURL.map {
+            ProjectIconCache(storageDirectoryURL: $0.appendingPathComponent("Favicons", isDirectory: true))
+        } ?? .shared
         self.portScanner = portScanner
         self.portKiller = portKiller
         self.projectInspector = projectInspector
@@ -113,7 +135,9 @@ final class LocalMonitorModel: ObservableObject {
         self.healthChecker = healthChecker
         self.healthChecksEnabled = healthChecksEnabled ?? AppPreference.healthChecks
         self.notificationService = notificationService ?? .shared
-        self.processManager = processManager ?? ProjectProcessManager(userDefaults: userDefaults)
+        self.processManager = processManager ?? ProjectProcessManager(
+            userDefaults: userDefaults, storageDirectoryURL: store.storageDirectoryURL?.appendingPathComponent("Managed Processes")
+        )
         self.defaults = userDefaults
         let loadedLibrary = store.load()
         let library = Self.migrateLegacyCommandTemplates(in: loadedLibrary)
@@ -136,7 +160,7 @@ final class LocalMonitorModel: ObservableObject {
             healthStates[project.id] = .unknown
         }
 
-        self.processManager.reconcile(projects: projects)
+        self.processManager.reconcile(projects: projects, pruneMissing: store.loadIssue == nil)
         self.processManager.onEvent = { [weak self] event in
             self?.handle(processEvent: event)
         }
@@ -155,15 +179,25 @@ final class LocalMonitorModel: ObservableObject {
             while !Task.isCancelled {
                 let interval = UInt64(AppPreference.refreshInterval * 1_000_000_000)
                 try? await Task.sleep(nanoseconds: interval)
+                guard !Task.isCancelled else { break }
                 await self.refresh()
             }
         }
     }
 
     func stop() {
+        pendingBrowserOpens.removeAll()
         cancelAllReliabilityOperations()
         refreshTask?.cancel()
         refreshTask = nil
+        refreshCycle?.cancel()
+        refreshCycle = nil
+        for request in refreshRequests { request.completion.resume(returning: nil) }
+        refreshRequests.removeAll()
+        isRefreshing = false
+        healthRefreshTask?.cancel()
+        healthRefreshTask = nil
+        readinessCheckIDs.removeAll()
     }
 
     func shutdown() {
@@ -174,41 +208,87 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func refresh() async {
-        if isRefreshing { return }
-        isRefreshing = true
-        defer { isRefreshing = false }
+        _ = await requestRefresh()
+    }
 
+    private func requestRefresh(includingExternalPorts: Bool = false) async -> [DiscoveredPort]? {
+        guard !Task.isCancelled else { return nil }
+        return await withCheckedContinuation { completion in
+            refreshRequests.append(RefreshRequest(includesExternalPorts: includingExternalPorts, completion: completion))
+            guard refreshCycle == nil else { return }
+            isRefreshing = true
+            refreshCycle = Task {
+                guard !Task.isCancelled else { return }
+                while !refreshRequests.isEmpty {
+                    let batch = refreshRequests
+                    refreshRequests.removeAll()
+                    let ports = await refreshOnce(includingExternalPorts: batch.contains(where: \.includesExternalPorts))
+                    for request in batch { request.completion.resume(returning: ports) }
+                    if Task.isCancelled { return }
+                }
+                refreshCycle = nil
+                isRefreshing = false
+            }
+        }
+    }
+
+    private func refreshOnce(includingExternalPorts: Bool) async -> [DiscoveredPort]? {
+        guard !Task.isCancelled else { return nil }
+        var snapshot: [DiscoveredPort]?
         refreshProjectNames()
         refreshBrowserHostnames()
-        ProjectIconCache.shared.refreshFavicons(for: projects)
-        processManager.reconcile(projects: projects)
+        let completeLibrary = store.loadIssue == nil
+        iconCache.refreshFavicons(for: projects, pruneMissing: completeLibrary)
+        processManager.reconcile(projects: projects, pruneMissing: completeLibrary)
 
         do {
-            let scanned = AppPreference.scanExternalPorts ? try await portScanner.scan() : []
-            discoveredPorts = applyPortPreferences(to: annotate(scanned))
+            let includeExternal = defaults.object(forKey: AppPreference.scanExternalPortsKey) as? Bool ?? true
+            let pids = includeExternal || includingExternalPorts ? nil : Set(processManager.managedProjectIDsByPID().keys)
+            let scanned = try await portScanner.scan(pids: pids, requireComplete: includingExternalPorts)
+            guard !Task.isCancelled else { return nil }
+            let annotated = annotate(scanned, managedProjectIDsByPID: processManager.managedProjectIDsByPID())
+            snapshot = annotated
+            let showExternal = defaults.object(forKey: AppPreference.scanExternalPortsKey) as? Bool ?? true
+            discoveredPorts = applyPortPreferences(to: annotated.filter { port in
+                (showExternal || port.isManaged) && !(port.projectId.map(processManager.isTerminating) ?? false)
+            })
+            if let pendingKillPort, !discoveredPorts.contains(where: {
+                $0.id == pendingKillPort.id && $0.startedAt == pendingKillPort.startedAt && $0.projectId == pendingKillPort.projectId
+            }) { self.pendingKillPort = nil }
             reconcileRunningStates()
             let faviconProjects = projects.filter { isProjectOnlineForGrouping($0) }.map { project in
                 var destination = project
                 destination.port = runtimeState(for: project).observedPort ?? project.port
                 return destination
             }
-            ProjectIconCache.shared.refreshSiteFavicons(for: faviconProjects)
-            await refreshProjectIdentities()
-            await refreshReadinessStates()
+            iconCache.refreshSiteFavicons(for: faviconProjects)
+            if healthChecksEnabled, healthRefreshTask == nil, !Task.isCancelled {
+                healthRefreshTask = Task {
+                    await refreshReadinessStates()
+                    if !Task.isCancelled { healthRefreshTask = nil }
+                }
+            }
             if !healthChecksEnabled {
                 resetHealthStates()
             }
             scheduleCacheStateRefresh()
-            refreshManagedLogs()
-            lastError = nil
+            await refreshProjectIdentities()
+            guard !Task.isCancelled else { return nil }
+            await logReader.rotateLargeLogs(at: projects.map { processManager.logURL(for: $0.id) })
+            await refreshSelectedLog()
+            guard !Task.isCancelled else { return nil }
+            scanError = nil
         } catch {
-            lastError = error.localizedDescription
+            guard !Task.isCancelled else { return nil }
+            scanError = error.localizedDescription
         }
 
         await refreshResourceMeasurements()
+        guard !Task.isCancelled else { return nil }
         persistRuntimeSessions()
         lastUpdated = Date()
         updateMenuBarTitle()
+        return snapshot
     }
 
     func chooseAndAddProject() {
@@ -287,8 +367,10 @@ final class LocalMonitorModel: ObservableObject {
             return
         }
         let detection = ProjectDetector.detect(folderURL: folderURL, preferredPort: AppPreference.defaultPort)
-        guard !projects.contains(where: { $0.path == folderURL.path }) else { return }
-        let port = nextAvailablePort(startingAt: detection.defaultPort)
+        let listeners = (try? await portScanner.scan()) ?? discoveredPorts
+        let folder = folderURL.resolvingSymlinksInPath().standardizedFileURL
+        guard !projects.contains(where: { $0.folderURL.resolvingSymlinksInPath().standardizedFileURL.path == folder.path }),
+              let port = importPort(for: folder, preferredPort: detection.defaultPort, listeners: listeners) else { return }
         let project = LocalProject(
             name: detection.name,
             profileName: primaryProfileName(for: detection.kind),
@@ -321,18 +403,23 @@ final class LocalMonitorModel: ObservableObject {
             if $1.id == preferred?.id { return false }
             return $0.relativePath < $1.relativePath
         }
+        var portsExhausted = false
         for profile in ordered where !projects.contains(where: {
-            $0.folderURL.standardizedFileURL.resolvingSymlinksInPath()
-                == profile.folderURL.standardizedFileURL.resolvingSymlinksInPath()
+            $0.folderURL.resolvingSymlinksInPath().standardizedFileURL.path
+                == profile.folderURL.resolvingSymlinksInPath().standardizedFileURL.path
         }) {
             let detection = profile.detection
+            guard let port = importPort(for: profile.folderURL, preferredPort: detection.defaultPort, listeners: listeners) else {
+                portsExhausted = true
+                break
+            }
             let project = LocalProject(
                 name: name,
                 profileName: profile.relativePath == "." ? primaryProfileName(for: detection.kind) : profile.folderURL.lastPathComponent,
                 path: profile.folderURL.path,
                 kind: detection.kind,
                 packageManager: detection.packageManager,
-                port: importPort(for: profile.folderURL, preferredPort: detection.defaultPort, listeners: listeners),
+                port: port,
                 commandTemplate: detection.commandTemplate,
                 hostname: detection.hostname,
                 workspaceRootPath: rootURL.path,
@@ -345,12 +432,14 @@ final class LocalMonitorModel: ObservableObject {
         persist()
         updateMenuBarTitle()
         await refresh()
+        if portsExhausted { operationError = "All project ports are in use." }
     }
 
     func removeProject(_ project: LocalProject) {
         stopProject(project)
         processManager.removeLog(for: project.id)
         projects.removeAll { $0.id == project.id }
+        discoveredPorts = annotate(discoveredPorts, managedProjectIDsByPID: processManager.managedProjectIDsByPID())
         for index in groups.indices {
             groups[index].projectIDs.removeAll { $0 == project.id }
         }
@@ -384,7 +473,8 @@ final class LocalMonitorModel: ObservableObject {
             recordProjectUse(project)
         }
 
-        if isInstallingDependencies(for: project) || isInstallingNode(for: project) { return }
+        if isInstallingDependencies(for: project) || isInstallingNode(for: project)
+            || cleaningFolders.contains(project.folderURL.resolvingSymlinksInPath().standardizedFileURL.path) { return }
 
         let state = runtimeState(for: project)
         if state.status == .running || state.status == .warmingUp || state.status == .responseDelayed || state.status == .starting || state.status == .portMismatch || state.status == .noPort || state.status == .noResponse {
@@ -403,6 +493,7 @@ final class LocalMonitorModel: ObservableObject {
             if projectLaunchRequests[project.id] == request {
                 projectLaunchRequests.removeValue(forKey: project.id)
                 preflightTasks.removeValue(forKey: project.id)
+                if Task.isCancelled { pendingBrowserOpens.remove(project.id) }
                 if Task.isCancelled, runtimeStates[project.id]?.status == .starting,
                    !processManager.isRunning(projectId: project.id) {
                     setState(for: project.id, status: .stopped)
@@ -410,13 +501,29 @@ final class LocalMonitorModel: ObservableObject {
             }
         }
 
+        if processManager.isTerminating(project.id) {
+            let stopped = await processManager.waitForTermination(of: project.id)
+            guard !Task.isCancelled, projectLaunchRequests[project.id] == request else { return }
+            guard stopped else {
+                operationError = "The previous process is still running."
+                return
+            }
+            guard let snapshot = await requestRefresh(includingExternalPorts: true),
+                  !Task.isCancelled, projectLaunchRequests[project.id] == request else { return }
+            if let conflict = snapshot.first(where: { $0.port == project.port && $0.projectId != project.id }) {
+                setState(for: project.id, status: .portBusy, message: "\(conflict.displayOwner) owns port \(project.port).")
+                return
+            }
+            if let owner = snapshot.first(where: { $0.projectId == project.id && !$0.isManaged }),
+               !discoveredPorts.contains(where: { $0.id == owner.id }) {
+                operationError = "A process is still running for this project."
+                return
+            }
+        }
         if let owner = matchingProjectPortOwner(for: project) {
+            if project.openAfterStart { pendingBrowserOpens.insert(project.id) }
             markRunning(project, owner: owner)
             await checkReadiness(for: project, force: true)
-            guard !Task.isCancelled, projectLaunchRequests[project.id] == request else { return }
-            if runtimeState(for: project).status == .running, project.openAfterStart {
-                openInBrowser(project, recordsUsage: false)
-            }
             return
         }
 
@@ -458,11 +565,15 @@ final class LocalMonitorModel: ObservableObject {
             message: project.resolvedCommand
         )
 
+        if project.openAfterStart { pendingBrowserOpens.insert(project.id) }
         do {
             try await processManager.start(project: project, launchEnvironment: preflight.launchEnvironment)
         } catch is CancellationError {
+            if projectLaunchRequests[project.id] == request { pendingBrowserOpens.remove(project.id) }
             return
         } catch {
+            guard projectLaunchRequests[project.id] == request else { return }
+            pendingBrowserOpens.remove(project.id)
             setState(for: project.id, status: .crashed, message: error.localizedDescription)
             return
         }
@@ -470,12 +581,12 @@ final class LocalMonitorModel: ObservableObject {
         try? await Task.sleep(nanoseconds: 900_000_000)
         guard !Task.isCancelled, projectLaunchRequests[project.id] == request else { return }
         await refresh()
-        guard !Task.isCancelled, projectLaunchRequests[project.id] == request else { return }
-        let refreshedState = runtimeState(for: project)
+    }
 
-        if refreshedState.status == .running, project.openAfterStart {
-            openInBrowser(project, recordsUsage: false)
-        }
+    private func openBrowserIfReady(for project: LocalProject) {
+        guard runtimeStates[project.id]?.status == .running,
+              pendingBrowserOpens.remove(project.id) != nil, project.openAfterStart else { return }
+        openInBrowser(project, recordsUsage: false)
     }
 
     func stopProject(_ project: LocalProject) {
@@ -487,13 +598,23 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     private func stopProject(_ project: LocalProject, schedulesVerification: Bool) {
+        pendingBrowserOpens.remove(project.id)
         cancelReliabilityOperations(for: project.id)
         if processManager.isRunning(projectId: project.id) || processManager.isStarting(projectId: project.id) {
             processManager.stop(projectId: project.id)
-        } else if let owner = matchingProjectProcessOwner(for: project) {
-            ProcessTree.terminate(pid: owner.pid)
+        } else if let owner = Self.externalProcessToStop(for: project, in: discoveredPorts),
+                  processManager.projectId(containing: owner.pid) == nil,
+                  Self.externalOwner(of: discoveredPorts.filter { $0.pid == owner.pid }, byFolder: projectsByFolder)?.id == project.id,
+                  let startedAt = owner.startedAt, ProcessTree.startDate(of: owner.pid) == startedAt {
+            processManager.beginTermination(pid: owner.pid, startedAt: startedAt, for: project.id)
+        } else if discoveredPorts.contains(where: { $0.projectId == project.id }) {
+            operationError = "Could not identify a single process to stop. Check the project's ports."
+            if schedulesVerification { Task { await refresh() } }
+            return
         }
 
+        operationError = nil
+        discoveredPorts.removeAll { $0.projectId == project.id }
         runtimeStates[project.id] = .stopped
         healthStates[project.id] = .unknown
         invalidateReadinessCheck(for: project.id)
@@ -511,10 +632,11 @@ final class LocalMonitorModel: ObservableObject {
     private func verifyStopped(_ project: LocalProject) async {
         try? await Task.sleep(nanoseconds: 1_000_000_000)
         guard !Task.isCancelled, projects.contains(where: { $0.id == project.id }) else { return }
-        await refresh()
-        guard !Task.isCancelled, projects.contains(where: { $0.id == project.id }) else { return }
+        guard let ports = await requestRefresh(includingExternalPorts: true), !Task.isCancelled,
+              projects.contains(where: { $0.id == project.id }), !processManager.isRunning(projectId: project.id) else { return }
 
-        guard let owner = matchingProjectProcessOwner(for: project) else {
+        let owners = ports.filter { $0.projectId == project.id }
+        guard let owner = owners.first(where: { $0.port == project.port }) ?? owners.first else {
             runtimeStates[project.id] = .stopped
             healthStates[project.id] = .unknown
             invalidateReadinessCheck(for: project.id)
@@ -523,20 +645,10 @@ final class LocalMonitorModel: ObservableObject {
             return
         }
 
-        ProcessTree.terminate(pid: owner.pid)
-        try? await Task.sleep(nanoseconds: 700_000_000)
-        guard !Task.isCancelled, projects.contains(where: { $0.id == project.id }) else { return }
-        await refresh()
-        guard !Task.isCancelled, projects.contains(where: { $0.id == project.id }) else { return }
-
-        if let remainingOwner = matchingProjectProcessOwner(for: project) {
-            markPortMismatch(project, owner: remainingOwner)
-            appendLog(projectId: project.id, text: "Stop requested, but process is still running on \(remainingOwner.port).")
-        } else {
-            runtimeStates[project.id] = .stopped
-            healthStates[project.id] = .unknown
-            invalidateReadinessCheck(for: project.id)
-        }
+        // A newly discovered listener may belong to a later launch. Only report its state.
+        if owner.port == project.port { markRunning(project, owner: owner) }
+        else { markPortMismatch(project, owner: owner) }
+        appendLog(projectId: project.id, text: "A process is listening on \(owner.port) after Stop.")
 
         persistRuntimeSessions()
         updateMenuBarTitle()
@@ -562,8 +674,7 @@ final class LocalMonitorModel: ObservableObject {
         let request = UUID()
         maintenanceRequests[project.id] = request
         defer { if maintenanceRequests[project.id] == request { maintenanceRequests.removeValue(forKey: project.id) } }
-        await refreshAfterProcessStop()
-        guard maintenanceRequests[project.id] == request, !Task.isCancelled else { return }
+        guard await canContinueMaintenance(for: project, request: request, operation: .restart) else { return }
         setCleanRestartState(
             for: project,
             phase: .starting,
@@ -601,6 +712,45 @@ final class LocalMonitorModel: ObservableObject {
         clearCleanRestartStateLater(for: project.id)
     }
 
+    private func canContinueMaintenance(for project: LocalProject, request: UUID, operation: ProjectOperationKind) async -> Bool {
+        let stopped = await processManager.waitForTermination(of: project.id)
+        guard maintenanceRequests[project.id] == request, !Task.isCancelled else { return false }
+        let snapshot = await requestRefresh(includingExternalPorts: true)
+        guard maintenanceRequests[project.id] == request, !Task.isCancelled else { return false }
+        let folder = project.folderURL.resolvingSymlinksInPath().standardizedFileURL.path
+        let profiles = operation == .cacheClean
+            ? projects.filter { $0.folderURL.resolvingSymlinksInPath().standardizedFileURL.path == folder }
+            : [project]
+        let ids = Set(profiles.map(\.id))
+        let message: String
+        if !stopped {
+            message = "The previous process is still running."
+        } else if let snapshot {
+            let hasListener = snapshot.contains { port in
+                if operation == .restart && port.port == project.port { return true }
+                if let id = port.projectId { return ids.contains(id) }
+                guard operation == .cacheClean, let cwd = port.workingDirectory else { return false }
+                let path = URL(fileURLWithPath: cwd).resolvingSymlinksInPath().standardizedFileURL.path
+                return path == folder || path.hasPrefix(folder + "/")
+            }
+            let busy = profiles.contains { profile in
+                processManager.isRunning(projectId: profile.id) || processManager.isStarting(projectId: profile.id)
+                    || projectLaunchRequests[profile.id] != nil || processManager.isTerminating(profile.id)
+                    || (profile.id != project.id && maintenanceRequests[profile.id] != nil)
+            }
+            guard hasListener || busy || cleaningFolders.contains(folder) else { return true }
+            message = operation == .cacheClean
+                ? "A process or profile is still using this folder. Stop it before cleaning the cache."
+                : "The project is still running or its port is in use."
+        } else {
+            message = scanError ?? "Could not verify that the project stopped."
+        }
+        setCleanRestartState(for: project, phase: .failed, message: message, progress: 1, operation: operation)
+        appendLog(projectId: project.id, text: message)
+        clearCleanRestartStateLater(for: project.id)
+        return false
+    }
+
     func cleanRestartProject(_ project: LocalProject) async {
         guard project.kind.supportsCleanRestart, !isInstallingDependencies(for: project), !isInstallingNode(for: project),
               projects.contains(where: { $0.id == project.id }) else { return }
@@ -623,10 +773,7 @@ final class LocalMonitorModel: ObservableObject {
         let request = UUID()
         maintenanceRequests[project.id] = request
         defer { if maintenanceRequests[project.id] == request { maintenanceRequests.removeValue(forKey: project.id) } }
-        if shouldRestartAfterClean {
-            await refreshAfterProcessStop()
-            guard maintenanceRequests[project.id] == request, !Task.isCancelled else { return }
-        }
+        guard await canContinueMaintenance(for: project, request: request, operation: .cacheClean) else { return }
 
         setCleanRestartState(
             for: project,
@@ -749,9 +896,11 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func stopAllProjects() {
+        pendingBrowserOpens.removeAll()
         let pending = Set(dependencyLaunchTasks.keys).union(projectLaunchRequests.keys).union(maintenanceRequests.keys)
         cancelAllReliabilityOperations()
         let stoppedProjectIDs = processManager.stopAll().union(pending)
+        discoveredPorts.removeAll { $0.projectId.map(stoppedProjectIDs.contains) == true }
         for project in projects where stoppedProjectIDs.contains(project.id) {
             runtimeStates[project.id] = .stopped
             invalidateReadinessCheck(for: project.id)
@@ -761,8 +910,10 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func requestKillPort(_ port: DiscoveredPort) async {
-        if AppPreference.safeKill, port.safety != .normal, pendingKillPortID != port.id {
-            pendingKillPortID = port.id
+        if AppPreference.safeKill, port.safety != .normal,
+           (pendingKillPort?.id != port.id || pendingKillPort?.startedAt != port.startedAt
+            || pendingKillPort?.projectId != port.projectId) {
+            pendingKillPort = port
             return
         }
 
@@ -770,18 +921,35 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func killPort(_ port: DiscoveredPort) async {
-        pendingKillPortID = nil
+        pendingKillPort = nil
 
-        if let projectId = port.projectId, let project = projects.first(where: { $0.id == projectId }) {
+        guard let startedAt = port.startedAt else {
+            operationError = "Could not verify the identity of the process on port \(port.port)."
+            return
+        }
+        guard ProcessTree.startDate(of: port.pid) == startedAt,
+              discoveredPorts.contains(where: {
+                  $0.pid == port.pid && $0.port == port.port && $0.projectId == port.projectId && $0.startedAt == startedAt
+              }) else {
+            await refresh()
+            return
+        }
+        let managedID = processManager.projectId(containing: port.pid)
+        if port.isManaged || managedID != nil {
+            guard let id = managedID, port.projectId == id, port.isManaged,
+                  let project = projects.first(where: { $0.id == id }) else {
+                await refresh()
+                return
+            }
             stopProject(project)
             return
         }
 
         do {
-            try await portKiller.stop(pid: port.pid)
-            lastError = nil
+            try await portKiller.stop(pid: port.pid, startedAt: startedAt)
+            operationError = nil
         } catch {
-            lastError = error.localizedDescription
+            operationError = error.localizedDescription
         }
 
         await refresh()
@@ -889,7 +1057,7 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func useNextAvailablePort(for project: LocalProject) {
-        let port = nextAvailablePort(startingAt: project.port + 1, excluding: project.id)
+        guard let port = nextAvailablePort(startingAt: project.port + 1, excluding: project.id) else { return }
         updatePort(for: project, port: port)
     }
 
@@ -911,6 +1079,7 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func updateOpenAfterStart(for project: LocalProject, enabled: Bool) {
+        if !enabled { pendingBrowserOpens.remove(project.id) }
         updateProject(project) { mutable in
             mutable.openAfterStart = enabled
         }
@@ -918,16 +1087,9 @@ final class LocalMonitorModel: ObservableObject {
 
     func updatePackageManager(for project: LocalProject, packageManager: PackageManager) {
         updateProject(project) { mutable in
-            for (old, new) in [(mutable.packageManager.devCommand, packageManager.devCommand),
-                               (mutable.packageManager.startCommand, packageManager.startCommand)] {
-                let command = mutable.commandTemplate
-                if command == old || command.hasPrefix(old + " ") {
-                    var arguments = String(command.dropFirst(old.count)).trimmingCharacters(in: .whitespaces)
-                    if mutable.packageManager == .npm, arguments.hasPrefix("-- ") { arguments = String(arguments.dropFirst(3)) }
-                    mutable.commandTemplate = new + packageManager.scriptArguments(arguments)
-                    break
-                }
-            }
+            mutable.commandTemplate = ProjectDetector.switchPackageManager(
+                in: mutable.commandTemplate, from: mutable.packageManager, to: packageManager
+            )
             mutable.packageManager = packageManager
         }
     }
@@ -965,20 +1127,20 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func applyPreset(_ preset: CommandPreset, to project: LocalProject) {
+        let nextPort = preset.port.flatMap { nextAvailablePort(startingAt: $0, excluding: project.id) }
+        guard preset.port == nil || nextPort != nil else { return }
         updateProject(project) { mutable in
             mutable.kind = preset.kind
             mutable.commandTemplate = preset.commandTemplate
             mutable.healthPath = preset.healthPath
-            if let port = preset.port {
-                mutable.port = nextAvailablePort(startingAt: port, excluding: project.id)
-            }
+            if let nextPort { mutable.port = nextPort }
             mutable.profileName = preset.title
         }
     }
 
     func duplicateProfile(from project: LocalProject, preset: CommandPreset? = nil) {
         let presetPort = preset?.port ?? project.port + 1
-        let nextPort = nextAvailablePort(startingAt: presetPort)
+        guard let nextPort = nextAvailablePort(startingAt: presetPort, excluding: nil) else { return }
         var clone = project
         clone.id = UUID()
         clone.profileName = preset?.title ?? nextProfileName(for: project)
@@ -1151,6 +1313,7 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func clearLogs(for project: LocalProject) {
+        logRevision &+= 1
         processManager.clearLog(for: project.id)
         var state = runtimeStates[project.id] ?? .stopped
         state.logs.removeAll()
@@ -1158,7 +1321,11 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func copyLogs(for project: LocalProject) {
-        copyToPasteboard(logs(for: project).joined(separator: "\n"))
+        Task {
+            let url = processManager.logLocation(for: project.id)
+            let lines = await logReader.lines(at: url) ?? logs(for: project)
+            copyToPasteboard(lines.joined(separator: "\n"))
+        }
     }
 
     func updateMenuBarTitle() {
@@ -1237,29 +1404,26 @@ final class LocalMonitorModel: ObservableObject {
 
     func conflictOwner(for project: LocalProject) -> DiscoveredPort? {
         discoveredPorts.first { port in
-            port.port == project.port && port.projectId != project.id && !sameProjectPortOwner(port, for: project)
+            port.port == project.port && port.projectId != project.id
         }
     }
 
     private func matchingProjectPortOwner(for project: LocalProject) -> DiscoveredPort? {
         discoveredPorts.first { port in
-            sameProjectPortOwner(port, for: project)
+            port.port == project.port && port.projectId == project.id
         }
     }
 
-    private func sameProjectPortOwner(_ port: DiscoveredPort, for project: LocalProject) -> Bool {
-        port.port == project.port && sameProjectProcessOwner(port, for: project)
+    private func matchingProjectProcessOwner(for project: LocalProject) -> DiscoveredPort? {
+        matchingProjectPortOwner(for: project) ?? discoveredPorts.first { $0.projectId == project.id }
     }
 
-    private func matchingProjectProcessOwner(for project: LocalProject) -> DiscoveredPort? {
-        discoveredPorts
-            .filter { sameProjectProcessOwner($0, for: project) }
-            .sorted { lhs, rhs in
-                if lhs.port == project.port { return true }
-                if rhs.port == project.port { return false }
-                return lhs.port < rhs.port
-            }
-            .first
+    static func externalProcessToStop(for project: LocalProject, in ports: [DiscoveredPort]) -> DiscoveredPort? {
+        let listeners = ports.filter { $0.projectId == project.id && !$0.isManaged }
+        let expected = listeners.filter { $0.port == project.port }
+        let candidates = expected.isEmpty ? listeners : expected
+        guard Set(candidates.map(\.pid)).count == 1 else { return nil }
+        return candidates.first
     }
 
     private func projectIsRunningOrStarting(_ project: LocalProject) -> Bool {
@@ -1289,32 +1453,36 @@ final class LocalMonitorModel: ObservableObject {
         }
     }
 
-    private func sameProjectProcessOwner(_ port: DiscoveredPort, for project: LocalProject) -> Bool {
-        if port.projectId == project.id {
-            return true
+    private var projectsByFolder: [String: [LocalProject]] {
+        Dictionary(grouping: projects) { $0.folderURL.resolvingSymlinksInPath().standardizedFileURL.path }
+    }
+
+    static func externalOwner(of listeners: [DiscoveredPort], byFolder: [String: [LocalProject]]) -> LocalProject? {
+        guard let directory = listeners.first?.workingDirectory else { return nil }
+        var folder = URL(fileURLWithPath: directory).resolvingSymlinksInPath().standardizedFileURL
+        while true {
+            if let profiles = byFolder[folder.path] {
+                if profiles.count == 1 { return profiles[0] }
+                let ports = Set(listeners.map(\.port))
+                let matching = profiles.filter { ports.contains($0.port) }
+                return matching.count == 1 ? matching[0] : nil
+            }
+            if folder.path == "/" { return nil }
+            let parent = folder.deletingLastPathComponent()
+            guard !parent.path.isEmpty, parent.path != folder.path else { return nil }
+            folder = parent
         }
-
-        guard let workingDirectory = port.workingDirectory else {
-            return false
-        }
-
-        let projectPath = URL(fileURLWithPath: project.path, isDirectory: true)
-            .standardizedFileURL
-            .path
-        let processPath = URL(fileURLWithPath: workingDirectory, isDirectory: true)
-            .standardizedFileURL
-            .path
-
-        return processPath == projectPath || processPath.hasPrefix("\(projectPath)/")
     }
 
     private func updateProject(_ project: LocalProject, mutate: (inout LocalProject) -> Void) {
         guard let index = projects.firstIndex(where: { $0.id == project.id }) else { return }
         let previous = projects[index]
         mutate(&projects[index])
-        if previous.path != projects[index].path || previous.commandTemplate != projects[index].commandTemplate
+        if previous.path != projects[index].path || previous.port != projects[index].port || previous.commandTemplate != projects[index].commandTemplate
             || previous.packageManager != projects[index].packageManager || previous.reliability != projects[index].reliability {
+            pendingBrowserOpens.remove(project.id)
             cancelReliabilityOperations(for: project.id)
+            processManager.cancelPendingStart(for: project.id)
             if runtimeStates[project.id]?.status == .starting, !processManager.isRunning(projectId: project.id) {
                 runtimeStates[project.id] = .stopped
             }
@@ -1355,13 +1523,6 @@ final class LocalMonitorModel: ObservableObject {
             ($0.id, LocalHostname.detectedHosts(in: $0.folderURL))
         })
         if hosts != projectBrowserHostnames { projectBrowserHostnames = hosts }
-    }
-
-    private func refreshAfterProcessStop() async {
-        while isRefreshing {
-            try? await Task.sleep(nanoseconds: 50_000_000)
-        }
-        await refresh()
     }
 
     private func setCleanRestartState(
@@ -1460,7 +1621,7 @@ final class LocalMonitorModel: ObservableObject {
                     .standardizedFileURL
 
                 guard
-                    Self.isSafeCachePath(cacheURL.path, rootPath: rootPath),
+                    ProjectCacheCleaner.contains(cacheURL, in: project.folderURL),
                     fileManager.fileExists(atPath: cacheURL.path)
                 else {
                     continue
@@ -1474,37 +1635,11 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     private func removeCleanCaches(for project: LocalProject) async throws -> [String] {
-        let rootPath = URL(fileURLWithPath: project.path, isDirectory: true)
-            .standardizedFileURL
-            .path
-        let relativePaths = project.kind.cleanCacheRelativePaths
-
+        let folder = project.folderURL.resolvingSymlinksInPath().standardizedFileURL.path
+        cleaningFolders.insert(folder)
+        defer { cleaningFolders.remove(folder) }
         return try await Task.detached(priority: .utility) {
-            var removedPaths: [String] = []
-            let fileManager = FileManager.default
-
-            for relativePath in relativePaths {
-                let cacheURL = URL(fileURLWithPath: rootPath, isDirectory: true)
-                    .appendingPathComponent(relativePath)
-                    .standardizedFileURL
-
-                guard Self.isSafeCachePath(cacheURL.path, rootPath: rootPath) else {
-                    throw CleanRestartError.unsafePath(relativePath)
-                }
-
-                guard fileManager.fileExists(atPath: cacheURL.path) else {
-                    continue
-                }
-
-                do {
-                    try fileManager.removeItem(at: cacheURL)
-                    removedPaths.append(relativePath)
-                } catch {
-                    throw CleanRestartError.removeFailed(relativePath, error.localizedDescription)
-                }
-            }
-
-            return removedPaths
+            try ProjectCacheCleaner.remove(relativePaths: project.kind.cleanCacheRelativePaths, in: project.folderURL)
         }.value
     }
 
@@ -1557,16 +1692,13 @@ final class LocalMonitorModel: ObservableObject {
         )
     }
 
-    nonisolated private static func isSafeCachePath(_ path: String, rootPath: String) -> Bool {
-        path != rootPath && path.hasPrefix("\(rootPath)/")
-    }
-
     private func persist() {
         store.save(ProjectLibrary(projects: projects, groups: groups))
     }
 
     private func persistRuntimeSessions() {
-        let snapshots = runtimeStates.reduce(into: [String: RuntimeSessionSnapshot]()) { result, item in
+        guard !projects.isEmpty || store.loadIssue == nil else { return }
+        var snapshots = runtimeStates.reduce(into: [String: RuntimeSessionSnapshot]()) { result, item in
             guard let startedAt = item.value.startedAt else { return }
             result[item.key.uuidString] = RuntimeSessionSnapshot(
                 startedAt: startedAt,
@@ -1577,6 +1709,12 @@ final class LocalMonitorModel: ObservableObject {
             )
         }
 
+        if store.loadIssue != nil {
+            let knownIDs = Set(projects.map(\.id))
+            for (id, snapshot) in Self.loadRuntimeSessions(from: defaults) where !knownIDs.contains(id) {
+                snapshots[id.uuidString] = snapshot
+            }
+        }
         guard !snapshots.isEmpty else {
             defaults.removeObject(forKey: Self.runtimeSessionsKey)
             return
@@ -1632,38 +1770,42 @@ final class LocalMonitorModel: ObservableObject {
                 normalized.commandTemplate = commandTemplate
                 normalized.updatedAt = Date()
             }
-            migrated.projects[index] = ProjectLaunchMigration.migrate(normalized)
+            migrated.projects[index] = ProjectLaunchMigration.migrate(ProjectDetector.repairDetectedDefaults(in: normalized))
         }
 
         return migrated
     }
 
-    private func nextAvailablePort(startingAt preferredPort: Int) -> Int {
-        nextAvailablePort(startingAt: preferredPort, excluding: nil)
-    }
-
-    private func importPort(for folder: URL, preferredPort: Int, listeners: [DiscoveredPort]) -> Int {
+    private func importPort(for folder: URL, preferredPort: Int, listeners: [DiscoveredPort]) -> Int? {
         let hasSavedOwner = projects.contains { $0.port == preferredPort }
-        let hasMatchingListener = listeners.contains { owner in
-            guard owner.port == preferredPort, let path = owner.workingDirectory else { return false }
-            return URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
-                == folder.standardizedFileURL.resolvingSymlinksInPath()
+        let expectedPath = folder.resolvingSymlinksInPath().standardizedFileURL.path
+        let atPreferredPort = listeners.filter { $0.port == preferredPort }
+        let sameProject = !atPreferredPort.isEmpty && atPreferredPort.allSatisfy { owner in
+            guard let path = owner.workingDirectory else { return false }
+            return URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path == expectedPath
         }
-        return !hasSavedOwner && hasMatchingListener ? preferredPort : nextAvailablePort(
+        return !hasSavedOwner && sameProject ? preferredPort : nextAvailablePort(
             startingAt: preferredPort, excluding: nil, occupiedPorts: Set(listeners.map(\.port))
         )
     }
 
-    private func nextAvailablePort(startingAt preferredPort: Int, excluding projectId: UUID?, occupiedPorts: Set<Int>? = nil) -> Int {
+    private func nextAvailablePort(startingAt preferredPort: Int, excluding projectId: UUID?, occupiedPorts: Set<Int>? = nil) -> Int? {
         let projectPorts = projects
             .filter { $0.id != projectId }
             .map(\.port)
         let usedPorts = (occupiedPorts ?? Set(discoveredPorts.map(\.port))).union(projectPorts)
-        var candidate = min(65_535, max(1_024, preferredPort))
-        while usedPorts.contains(candidate), candidate < 65_535 {
-            candidate += 1
+        operationError = nil
+        guard let port = Self.availablePort(startingAt: preferredPort, excluding: usedPorts) else {
+            operationError = "All project ports are in use."
+            return nil
         }
-        return candidate
+        return port
+    }
+
+    static func availablePort(startingAt preferredPort: Int, excluding usedPorts: Set<Int>) -> Int? {
+        let first = (1_024...65_535).contains(preferredPort) ? preferredPort : 1_024
+        return (first...65_535).first(where: { !usedPorts.contains($0) })
+            ?? (1_024..<first).first(where: { !usedPorts.contains($0) })
     }
 
     private func defaultProjectDirectoryURL() -> URL {
@@ -1681,23 +1823,24 @@ final class LocalMonitorModel: ObservableObject {
         } ?? home
     }
 
-    private func annotate(_ ports: [DiscoveredPort]) -> [DiscoveredPort] {
-        let managedProjectIDsByPID = processManager.managedProjectIDsByPID()
-
+    private func annotate(_ ports: [DiscoveredPort], managedProjectIDsByPID: [Int32: UUID]) -> [DiscoveredPort] {
+        let folders = projectsByFolder
+        let projectsByID = Dictionary(uniqueKeysWithValues: projects.map { ($0.id, $0) })
+        let unmanaged = ports.filter { managedProjectIDsByPID[$0.pid] == nil }
+        let managedIDs = Set(managedProjectIDsByPID.values)
+        let externalOwners = Dictionary(grouping: unmanaged, by: \.pid).compactMapValues {
+            listeners -> LocalProject? in
+            guard let owner = Self.externalOwner(of: listeners, byFolder: folders),
+                  !managedIDs.contains(owner.id) else { return nil }
+            return owner
+        }
         return ports.map { port in
+            let managedID = managedProjectIDsByPID[port.pid]
+            let project = managedID.flatMap { projectsByID[$0] } ?? externalOwners[port.pid]
             var copy = port
-            if
-                let projectId = managedProjectIDsByPID[port.pid],
-                let project = projects.first(where: { $0.id == projectId })
-            {
-                copy.isManaged = true
-                copy.projectId = project.id
-                copy.projectName = project.name
-            } else if let project = projects.first(where: { sameProjectProcessOwner(port, for: $0) }) {
-                copy.isManaged = false
-                copy.projectId = project.id
-                copy.projectName = project.name
-            }
+            copy.isManaged = managedID != nil
+            copy.projectId = project?.id
+            copy.projectName = project?.name
             return copy
         }
     }
@@ -1713,16 +1856,17 @@ final class LocalMonitorModel: ObservableObject {
 
     func reconcileRunningStates(now: Date = Date()) {
         for project in projects {
+            guard !processManager.isTerminating(project.id) else { continue }
             guard var state = runtimeStates[project.id] else {
                 runtimeStates[project.id] = .stopped
                 continue
             }
 
-            if state.status == .stopped || state.status == .starting || state.status == .running || state.status == .warmingUp || state.status == .responseDelayed || state.status == .portMismatch || state.status == .noPort || state.status == .noResponse {
+            if state.status != .crashed {
                 if let owner = matchingProjectPortOwner(for: project) {
-                    markRunning(project, owner: owner)
+                    markRunning(project, owner: owner, persist: false)
                 } else if let observed = matchingProjectProcessOwner(for: project) {
-                    markPortMismatch(project, owner: observed)
+                    markPortMismatch(project, owner: observed, persist: false)
                 } else if let pid = processManager.rootPID(for: project.id) {
                     state.ownership = .managed
                     let startedAt = state.startedAt ?? ProcessTree.startDate(of: pid) ?? now
@@ -1764,7 +1908,7 @@ final class LocalMonitorModel: ObservableObject {
         }
     }
 
-    func markRunning(_ project: LocalProject, owner: DiscoveredPort) {
+    func markRunning(_ project: LocalProject, owner: DiscoveredPort, persist: Bool = true) {
         var state = runtimeStates[project.id] ?? .stopped
         let previousStatus = state.status
         let listenerChanged = state.pid != owner.pid || state.observedPort != owner.port
@@ -1796,11 +1940,14 @@ final class LocalMonitorModel: ObservableObject {
             state.lastMessage = "Listening on \(project.localAuthority)"
         }
         runtimeStates[project.id] = state
-        persistRuntimeSessions()
-        updateMenuBarTitle()
+        openBrowserIfReady(for: project)
+        if persist {
+            persistRuntimeSessions()
+            updateMenuBarTitle()
+        }
     }
 
-    private func markPortMismatch(_ project: LocalProject, owner: DiscoveredPort) {
+    private func markPortMismatch(_ project: LocalProject, owner: DiscoveredPort, persist: Bool = true) {
         var state = runtimeStates[project.id] ?? .stopped
         invalidateReadinessCheck(for: project.id)
         state.readiness = ProjectReadinessState()
@@ -1811,8 +1958,10 @@ final class LocalMonitorModel: ObservableObject {
         state.observedPort = owner.port
         state.lastMessage = "Expected \(project.port), running on \(owner.port)."
         runtimeStates[project.id] = state
-        persistRuntimeSessions()
-        updateMenuBarTitle()
+        if persist {
+            persistRuntimeSessions()
+            updateMenuBarTitle()
+        }
     }
 
     private func syncStartedAt(_ state: inout ProjectRuntimeState, owner: DiscoveredPort) {
@@ -1872,6 +2021,7 @@ final class LocalMonitorModel: ObservableObject {
                 message: "Process started as PID \(pid)."
             )
         case .exited(let projectId, let code):
+            pendingBrowserOpens.remove(projectId)
             invalidateReadinessCheck(for: projectId)
             var state = runtimeStates[projectId] ?? .stopped
             state.readiness = ProjectReadinessState()
@@ -1898,6 +2048,7 @@ final class LocalMonitorModel: ObservableObject {
     }
 
     func appendLog(projectId: UUID, text: String) {
+        if selectedLogProjectID == projectId { logRevision &+= 1 }
         processManager.appendLog(projectId: projectId, text: text)
         var state = runtimeStates[projectId] ?? .stopped
         let lines = text
@@ -1913,13 +2064,13 @@ final class LocalMonitorModel: ObservableObject {
         runtimeStates[projectId] = state
     }
 
-    private func refreshManagedLogs() {
-        for project in projects where processManager.hasLog(for: project.id) {
-            processManager.maintainLogSize(for: project.id)
-            var state = runtimeStates[project.id] ?? .stopped
-            state.logs = processManager.logLines(for: project.id)
-            runtimeStates[project.id] = state
-        }
+    private func refreshSelectedLog() async {
+        guard let id = selectedLogProjectID else { return }
+        let revision = logRevision
+        let url = processManager.logLocation(for: id)
+        guard let lines = await logReader.lines(at: url), !Task.isCancelled, revision == logRevision,
+              selectedLogProjectID == id, runtimeStates[id]?.logs != lines else { return }
+        runtimeStates[id]?.logs = lines
     }
 
     private func refreshProjectIdentities(force: Bool = false) async {
@@ -1936,7 +2087,11 @@ final class LocalMonitorModel: ObservableObject {
         }
 
         for project in projects {
-            projectIdentities[project.id] = await projectInspector.inspect(project)
+            let identity = await projectInspector.inspect(project)
+            guard !Task.isCancelled else { return }
+            if projects.contains(where: { $0.id == project.id && $0.path == project.path && $0.kind == project.kind }) {
+                projectIdentities[project.id] = identity
+            }
         }
 
         lastProjectIdentityRefresh = now
@@ -1944,8 +2099,13 @@ final class LocalMonitorModel: ObservableObject {
 
     private func refreshReadinessStates(force: Bool = false) async {
         guard healthChecksEnabled else { return }
-        for project in projects where shouldCheckReadiness(for: project) {
-            await checkReadiness(for: project, force: force)
+        let candidates = projects.filter { shouldCheckReadiness(for: $0) }
+        await withTaskGroup(of: Void.self) { group in
+            for (index, project) in candidates.enumerated() {
+                if index >= 6 { await group.next() }
+                guard !Task.isCancelled else { break }
+                group.addTask { await self.checkReadiness(for: project, force: force) }
+            }
         }
     }
 
@@ -1977,12 +2137,15 @@ final class LocalMonitorModel: ObservableObject {
                 state.lastMessage = "Listening on \(project.hostname):\(state.observedPort ?? project.port)"
             }
             runtimeStates[project.id] = state
+            openBrowserIfReady(for: project)
         }
         updateMenuBarTitle()
     }
 
     func checkReadiness(for project: LocalProject, force: Bool = false) async {
-        guard healthChecksEnabled, shouldCheckReadiness(for: project),
+        guard !Task.isCancelled, healthChecksEnabled,
+              projects.contains(where: { $0.id == project.id && $0.healthURL == project.healthURL }),
+              shouldCheckReadiness(for: project),
               readinessCheckIDs[project.id] == nil else { return }
         if !force, let lastCheck = lastReadinessCheckDates[project.id],
            Date().timeIntervalSince(lastCheck) < readinessCheckRefreshInterval {
@@ -2036,6 +2199,7 @@ final class LocalMonitorModel: ObservableObject {
             break
         }
         runtimeStates[project.id] = state
+        openBrowserIfReady(for: project)
         updateMenuBarTitle()
     }
 
@@ -2050,6 +2214,7 @@ final class LocalMonitorModel: ObservableObject {
                 notificationService.notify(title: "\(project.displayName) is ready", body: "Listening on \(project.localAuthority)")
             }
         case .warning(let code, _):
+            if case .warning(let oldCode, _) = previous, oldCode == code { return }
             notificationService.notify(title: "\(project.displayName) health warning", body: "Health check returned \(code).")
         case .unreachable(let message):
             if case .healthy = previous {

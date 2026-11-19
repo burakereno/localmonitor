@@ -6,29 +6,6 @@ import XCTest
 final class RestartProjectTests: XCTestCase {
     @MainActor
     func testRestartReplacesRunningProcess() async throws {
-        let standardDefaults = UserDefaults.standard
-        let preferenceKeys = [
-            AppPreference.scanExternalPortsKey,
-            AppPreference.notificationsKey,
-            AppPreference.healthChecksKey
-        ]
-        let savedPreferences = preferenceKeys.reduce(into: [String: Any]()) { result, key in
-            result[key] = standardDefaults.object(forKey: key)
-        }
-
-        standardDefaults.set(true, forKey: AppPreference.scanExternalPortsKey)
-        standardDefaults.set(false, forKey: AppPreference.notificationsKey)
-        standardDefaults.set(false, forKey: AppPreference.healthChecksKey)
-        defer {
-            for key in preferenceKeys {
-                if let value = savedPreferences[key] {
-                    standardDefaults.set(value, forKey: key)
-                } else {
-                    standardDefaults.removeObject(forKey: key)
-                }
-            }
-        }
-
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("LocalMonitorRestartTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
@@ -55,12 +32,15 @@ final class RestartProjectTests: XCTestCase {
             runtimeDefaults.removePersistentDomain(forName: suiteName)
         }
 
+        runtimeDefaults.set(false, forKey: AppPreference.scanExternalPortsKey)
         let processManager = ProjectProcessManager(
             userDefaults: runtimeDefaults,
             storageDirectoryURL: temporaryDirectory.appendingPathComponent("logs")
         )
         let model = LocalMonitorModel(
             store: store,
+            healthChecksEnabled: false,
+            notificationService: NotificationService(isEnabled: { false }),
             processManager: processManager,
             userDefaults: runtimeDefaults
         )
@@ -71,6 +51,8 @@ final class RestartProjectTests: XCTestCase {
         await model.startProject(project)
         let originalPID = try XCTUnwrap(model.runtimeState(for: project).pid)
         XCTAssertTrue(Self.isAlive(originalPID))
+        XCTAssertTrue(model.discoveredPorts.contains { $0.projectId == project.id && $0.port == port && $0.isManaged })
+        XCTAssertTrue(model.externalPorts.isEmpty)
 
         await model.restartProject(project)
 

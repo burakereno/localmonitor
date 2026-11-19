@@ -76,6 +76,7 @@ struct StatusPanelView: View {
 
             footer
         }
+        .environmentObject(model.iconCache)
         .frame(width: 420, height: 840)
         .preferredColorScheme(.dark)
         .onAppear {
@@ -1158,6 +1159,8 @@ private struct SummaryCardView: View {
 
             if let error {
                 Text(error)
+                    .help(error)
+                    .textSelection(.enabled)
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.orange)
                     .lineLimit(2)

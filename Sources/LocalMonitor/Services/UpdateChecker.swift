@@ -126,42 +126,26 @@ final class UpdateChecker: ObservableObject {
         downloadProgress = 0
         lastError = nil
 
-        let task = URLSession.shared.downloadTask(with: downloadURL) { [weak self] tmpURL, response, error in
+        let workDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("localmonitor-update-\(UUID().uuidString)", isDirectory: true)
+        let destination = workDirectory.appendingPathComponent(Self.assetName)
+        let task = URLSession.shared.downloadTask(with: downloadURL) { tmpURL, response, error in
+            let download = Result<Void, Error> {
+                if let error { throw error }
+                guard let tmpURL, let response = response as? HTTPURLResponse,
+                      (200..<300).contains(response.statusCode) else { throw UpdateError.badResponse }
+                try FileManager.default.createDirectory(at: workDirectory, withIntermediateDirectories: false,
+                                                        attributes: [.posixPermissions: 0o700])
+                try FileManager.default.moveItem(at: tmpURL, to: destination)
+            }
             Task { @MainActor in
-                guard let self else { return }
                 defer {
                     self.isDownloading = false
                     self.downloadProgress = 0
+                    self.progressObservation = nil
                 }
-
-                if let error {
-                    self.lastError = error.localizedDescription
-                    return
-                }
-
-                guard let tmpURL else {
-                    self.lastError = "Download failed"
-                    return
-                }
-
-                guard let httpResponse = response as? HTTPURLResponse,
-                      (200..<300).contains(httpResponse.statusCode)
-                else {
-                    self.lastError = UpdateError.badResponse.localizedDescription
-                    return
-                }
-
-                let workDirectory = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("localmonitor-update-\(UUID().uuidString)", isDirectory: true)
-                let destination = workDirectory.appendingPathComponent(Self.assetName)
-
                 do {
-                    try FileManager.default.createDirectory(
-                        at: workDirectory,
-                        withIntermediateDirectories: false,
-                        attributes: [.posixPermissions: 0o700]
-                    )
-                    try FileManager.default.moveItem(at: tmpURL, to: destination)
+                    try download.get()
                     let manifest = try await Self.fetchManifest(at: manifestURL)
                     let assetName = Self.assetName
                     let bundleIdentifier = Self.productionBundleIdentifier
@@ -212,6 +196,7 @@ final class UpdateChecker: ObservableObject {
                 expectedSHA256: expectedSHA256
             )
         } catch {
+            try? FileManager.default.removeItem(at: dmgURL.deletingLastPathComponent())
             lastError = "Could not launch installer: \(error.localizedDescription)"
             return
         }

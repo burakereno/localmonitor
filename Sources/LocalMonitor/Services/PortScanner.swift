@@ -11,22 +11,39 @@ enum PortScannerError: LocalizedError {
     }
 }
 
-struct PortScanner {
-    func scan() async throws -> [DiscoveredPort] {
+protocol PortScanning {
+    func scan(pids: Set<Int32>?, requireComplete: Bool) async throws -> [DiscoveredPort]
+}
+
+extension PortScanning {
+    func scan() async throws -> [DiscoveredPort] { try await scan(pids: nil, requireComplete: false) }
+}
+
+struct PortScanner: PortScanning {
+    func scan(pids: Set<Int32>? = nil, requireComplete: Bool = false) async throws -> [DiscoveredPort] {
+        var arguments = ["-nP", "-iTCP", "-sTCP:LISTEN"]
+        if let pids {
+            guard !pids.isEmpty else { return [] }
+            arguments += ["-a", "-p", pids.map(String.init).joined(separator: ",")]
+        }
+        let scanStarted = Date()
         let result = try await Shell.run(
             "/usr/sbin/lsof",
-            arguments: ["-nP", "-iTCP", "-sTCP:LISTEN"]
+            arguments: arguments, maximumOutputBytes: 2_097_152
         )
 
-        return await enrich(try Self.ports(from: result))
+        return try await enrich(Self.ports(from: result, requireComplete: requireComplete), scanStarted: scanStarted, requireComplete: requireComplete)
     }
 
-    static func ports(from result: ShellResult) throws -> [DiscoveredPort] {
+    static func ports(from result: ShellResult, requireComplete: Bool = false) throws -> [DiscoveredPort] {
         // lsof also exits with 1 when its filters match no open sockets.
         if result.status == 1, result.stdout.nilIfBlank == nil, result.stderr.nilIfBlank == nil {
             return []
         }
-        if result.status != 0, result.stdout.nilIfBlank == nil {
+        if requireComplete, result.stdout.hasSuffix("\n[Output truncated]") {
+            throw PortScannerError.lsofFailed("The list of listening ports was truncated.")
+        }
+        if result.status != 0 && (result.status != 1 || requireComplete || result.stdout.nilIfBlank == nil) {
             throw PortScannerError.lsofFailed(result.stderr.nilIfBlank ?? "lsof exited with \(result.status)")
         }
 
@@ -48,101 +65,50 @@ struct PortScanner {
             }
     }
 
-    private func enrich(_ ports: [DiscoveredPort]) async -> [DiscoveredPort] {
-        let pids = Array(Set(ports.map(\.pid)))
-        var metadataByPID: [Int32: ProcessPortMetadata] = [:]
-
-        for pid in pids {
-            metadataByPID[pid] = await metadata(for: pid)
+    private func enrich(_ ports: [DiscoveredPort], scanStarted: Date, requireComplete: Bool) async throws -> [DiscoveredPort] {
+        guard !ports.isEmpty else { return [] }
+        let listenerPIDs = Set(ports.map(\.pid))
+        let startDates = Dictionary(uniqueKeysWithValues: listenerPIDs.compactMap { pid in
+            ProcessTree.startDate(of: pid).map { (pid, $0) }
+        })
+        let pids = listenerPIDs.map(String.init).joined(separator: ",")
+        async let cwd = Shell.run("/usr/sbin/lsof", arguments: ["-nP", "-a", "-p", pids, "-d", "cwd", "-Fpn"],
+                                  maximumOutputBytes: 2_097_152)
+        async let commands = Shell.run("/bin/ps", arguments: ["-ww", "-p", pids, "-o", "pid=,command="],
+                                       maximumOutputBytes: 2_097_152)
+        var directories: [Int32: String] = [:]
+        var pid: Int32?
+        let cwdResult = try? await cwd
+        if requireComplete {
+            guard let cwdResult, cwdResult.status == 0 || (cwdResult.status == 1 && !cwdResult.stdout.isEmpty),
+                  !cwdResult.stdout.hasSuffix("\n[Output truncated]") else {
+                throw PortScannerError.lsofFailed("Could not read the working directories of listening processes.")
+            }
         }
-
-        return ports.map { port in
-            guard let metadata = metadataByPID[port.pid] else { return port }
-
+        for line in cwdResult?.stdout.split(whereSeparator: \.isNewline) ?? [] {
+            if line.first == "p" { pid = Int32(line.dropFirst()) }
+            if line.first == "n", let pid { directories[pid] = String(line.dropFirst()) }
+        }
+        var commandLines: [Int32: String] = [:]
+        for line in (try? await commands.stdout)?.split(whereSeparator: \.isNewline) ?? [] {
+            let fields = line.split(maxSplits: 1, whereSeparator: \.isWhitespace)
+            if fields.count == 2, let pid = Int32(fields[0]) {
+                commandLines[pid] = Self.shortCommandLine(String(fields[1]))
+            }
+        }
+        let stablePIDs = listenerPIDs.filter { pid in
+            let birth = startDates[pid]
+            return birth == ProcessTree.startDate(of: pid) && (birth.map { $0 <= scanStarted } ?? true)
+        }
+        return ports.compactMap { port in
+            guard stablePIDs.contains(port.pid) else { return nil }
             var copy = port
-            copy.workingDirectory = metadata.workingDirectory
-            copy.commandLine = metadata.commandLine
-            copy.startedAt = metadata.startedAt
-            copy.inferredProjectName = Self.inferProjectName(
-                workingDirectory: metadata.workingDirectory,
-                command: port.command
-            )
+            copy.workingDirectory = directories[port.pid]
+            copy.commandLine = commandLines[port.pid]
+            copy.startedAt = startDates[port.pid]
+            copy.inferredProjectName = Self.inferProjectName(workingDirectory: copy.workingDirectory, command: port.command)
             return copy
         }
-    }
-
-    private func metadata(for pid: Int32) async -> ProcessPortMetadata {
-        async let cwd = workingDirectory(for: pid)
-        async let commandLine = commandLine(for: pid)
-        async let startedAt = startedAt(for: pid)
-        return await ProcessPortMetadata(
-            workingDirectory: cwd,
-            commandLine: commandLine,
-            startedAt: startedAt
-        )
-    }
-
-    private func workingDirectory(for pid: Int32) async -> String? {
-        guard
-            let result = try? await Shell.run(
-                "/usr/sbin/lsof",
-                arguments: ["-a", "-p", "\(pid)", "-d", "cwd", "-Fn"]
-            ),
-            result.status == 0
-        else {
-            return nil
-        }
-
-        return result.stdout
-            .split(whereSeparator: \.isNewline)
-            .compactMap { line -> String? in
-                let text = String(line)
-                guard text.hasPrefix("n") else { return nil }
-                return String(text.dropFirst()).nilIfBlank
-            }
-            .first
-    }
-
-    private func commandLine(for pid: Int32) async -> String? {
-        guard
-            let result = try? await Shell.run(
-                "/bin/ps",
-                arguments: ["-p", "\(pid)", "-o", "command="]
-            ),
-            result.status == 0
-        else {
-            return nil
-        }
-
-        return Self.shortCommandLine(result.stdout.nilIfBlank)
-    }
-
-    private func startedAt(for pid: Int32) async -> Date? {
-        guard
-            let result = try? await Shell.run(
-                "/bin/ps",
-                arguments: ["-p", "\(pid)", "-o", "lstart="]
-            ),
-            result.status == 0,
-            let startDate = Self.parseProcessStartDate(result.stdout)
-        else {
-            return nil
-        }
-
-        return startDate
-    }
-
-    static func parseProcessStartDate(_ output: String) -> Date? {
-        let normalized = output
-            .split(whereSeparator: \.isWhitespace)
-            .joined(separator: " ")
-        guard !normalized.isEmpty else { return nil }
-
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "EEE MMM d HH:mm:ss yyyy"
-        formatter.isLenient = true
-        return formatter.date(from: normalized)
     }
 
     static func inferProjectName(workingDirectory: String?, command: String) -> String? {
@@ -288,12 +254,6 @@ struct PortScanner {
         "vite",
         "yarn"
     ]
-}
-
-private struct ProcessPortMetadata {
-    let workingDirectory: String?
-    let commandLine: String?
-    let startedAt: Date?
 }
 
 private extension String {

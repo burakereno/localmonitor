@@ -25,6 +25,7 @@ struct ManagedProjectProcessRecord: Codable, Equatable {
     let projectId: UUID
     let rootPID: Int32
     let startedAt: Date
+    var preciseStart: TimeInterval? = nil
     let projectPath: String
     let commandFingerprint: String
     let logPath: String
@@ -36,6 +37,7 @@ final class ProjectProcessManager {
 
     private var processes: [UUID: RunningProcess] = [:]
     private var pendingStarts: [UUID: UUID] = [:]
+    private var terminating: [UUID: Task<Bool, Never>] = [:]
     private var records: [UUID: ManagedProjectProcessRecord]
     private let defaults: UserDefaults
     private let fileManager: FileManager
@@ -44,8 +46,8 @@ final class ProjectProcessManager {
     private let nodeRuntimeResolver: ProjectNodeRuntimeResolver
 
     private static let recordsKey = "managedProjectProcesses"
-    private static let maximumLogBytes: UInt64 = 10 * 1_024 * 1_024
-    private static let logTailBytes: UInt64 = 256 * 1_024
+    nonisolated static let maximumLogBytes: UInt64 = 10 * 1_024 * 1_024
+    nonisolated private static let logTailBytes: UInt64 = 256 * 1_024
 
     init(
         userDefaults: UserDefaults = .standard,
@@ -68,11 +70,12 @@ final class ProjectProcessManager {
         self.records = Self.loadRecords(from: userDefaults, decoder: decoder)
     }
 
-    func reconcile(projects: [LocalProject]) {
+    func reconcile(projects: [LocalProject], pruneMissing: Bool = true) {
         let projectsByID = Dictionary(uniqueKeysWithValues: projects.map { ($0.id, $0) })
         var didChange = false
 
         for (projectId, record) in Array(records) {
+            if projectsByID[projectId] == nil, !pruneMissing { continue }
             guard
                 let project = projectsByID[projectId],
                 standardizedPath(record.projectPath) == standardizedPath(project.path),
@@ -136,6 +139,13 @@ final class ProjectProcessManager {
         if removedStaleRecord {
             persistRecords()
         }
+        // A freshly launched child can be visible before the kernel exposes its start time.
+        for (id, running) in processes where running.process.isRunning {
+            let root = running.process.processIdentifier
+            guard map[root] == nil else { continue }
+            map[root] = id
+            for child in ProcessTree.descendants(of: root) { map[child] = id }
+        }
         return map
     }
 
@@ -149,6 +159,10 @@ final class ProjectProcessManager {
         defer {
             if pendingStarts[project.id] == requestID { pendingStarts.removeValue(forKey: project.id) }
         }
+        guard await waitForTermination(of: project.id) else {
+            throw ProjectProcessError.launchFailed("The previous process is still running.")
+        }
+        guard pendingStarts[project.id] == requestID else { throw CancellationError() }
         let environment: ProjectLaunchEnvironment
         if let launchEnvironment { environment = launchEnvironment }
         else { environment = try await ProjectLaunchEnvironment.prepare(project, nodeResolver: nodeRuntimeResolver) }
@@ -188,34 +202,48 @@ final class ProjectProcessManager {
             throw ProjectProcessError.launchFailed(error.localizedDescription)
         }
 
-        let startedAt = ProcessTree.startDate(of: process.processIdentifier) ?? Date()
-        records[project.id] = ManagedProjectProcessRecord(
-            projectId: project.id,
-            rootPID: process.processIdentifier,
-            startedAt: startedAt,
-            projectPath: standardizedPath(project.path),
-            commandFingerprint: commandFingerprint(project.resolvedCommand),
-            logPath: logURL.path
-        )
+        if let startedAt = ProcessTree.startDate(of: process.processIdentifier) {
+            records[project.id] = ManagedProjectProcessRecord(
+                projectId: project.id,
+                rootPID: process.processIdentifier,
+                startedAt: startedAt,
+                preciseStart: startedAt.timeIntervalSince1970,
+                projectPath: standardizedPath(project.path),
+                commandFingerprint: commandFingerprint(project.resolvedCommand),
+                logPath: logURL.path
+            )
+        }
         processes[project.id] = RunningProcess(process: process, logHandle: logHandle)
         persistRecords()
         onEvent?(.started(projectId: project.id, pid: process.processIdentifier))
     }
 
+    func cancelPendingStart(for id: UUID) { pendingStarts.removeValue(forKey: id) }
+
     func isStarting(projectId: UUID) -> Bool { pendingStarts[projectId] != nil }
 
     @discardableResult
     func stop(projectId: UUID) -> Bool {
+        let stopped = removeAndStop(projectId)
+        persistRecords()
+        return stopped
+    }
+
+    private func removeAndStop(_ projectId: UUID) -> Bool {
         let cancelledStart = pendingStarts.removeValue(forKey: projectId) != nil
         let running = processes.removeValue(forKey: projectId)
         let record = records.removeValue(forKey: projectId)
-        let pid = running?.process.processIdentifier ?? record.flatMap(validatedPID(for:))
+        let pid = record?.rootPID ?? running?.process.processIdentifier
 
         try? running?.logHandle.close()
-        persistRecords()
 
-        guard let pid else { return cancelledStart }
-        ProcessTree.terminate(pid: pid)
+        guard let pid, let birth = ProcessTree.startDate(of: pid) else { return cancelledStart }
+        if let record {
+            guard matchesStart(birth, record: record) else { return cancelledStart }
+        } else {
+            guard running?.process.isRunning == true else { return cancelledStart }
+        }
+        beginTermination(pid: pid, startedAt: birth, for: projectId, managedRecord: record)
         return true
     }
 
@@ -223,64 +251,69 @@ final class ProjectProcessManager {
     func stopAll() -> Set<UUID> {
         var stoppedProjectIDs = Set(pendingStarts.keys)
         pendingStarts.removeAll()
-        var rootPIDs = Set<Int32>()
-
-        for (projectId, running) in processes where running.process.isRunning {
-            stoppedProjectIDs.insert(projectId)
-            rootPIDs.insert(running.process.processIdentifier)
-            try? running.logHandle.close()
-        }
-
-        for (projectId, record) in records {
-            guard let pid = validatedPID(for: record) else { continue }
-            stoppedProjectIDs.insert(projectId)
-            rootPIDs.insert(pid)
-        }
-
-        processes.removeAll()
-        records.removeAll()
-        persistRecords()
-        ProcessTree.terminate(pids: Array(rootPIDs))
+        let active = Set(processes.keys).union(records.keys)
+        for id in active where removeAndStop(id) { stoppedProjectIDs.insert(id) }
+        if !active.isEmpty { persistRecords() }
         return stoppedProjectIDs
+    }
+
+    func beginTermination(pid: Int32, startedAt: Date, for projectID: UUID, managedRecord: ManagedProjectProcessRecord? = nil) {
+        guard terminating[projectID] == nil else { return }
+        let targets = ProcessTree.requestTermination(of: pid, startedAt: startedAt)
+        guard !targets.isEmpty else { return }
+        terminating[projectID] = Task {
+            try? await Task.sleep(for: .milliseconds(800))
+            ProcessTree.finishTermination(of: targets)
+            for _ in 0..<10 {
+                if !ProcessTree.hasLiveProcess(in: targets) { break }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            let stopped = !ProcessTree.hasLiveProcess(in: targets)
+            if !stopped, let managedRecord, validatedPID(for: managedRecord) != nil {
+                records[projectID] = managedRecord
+                persistRecords()
+            }
+            terminating.removeValue(forKey: projectID)
+            return stopped
+        }
+    }
+
+    func isTerminating(_ id: UUID) -> Bool { terminating[id] != nil }
+
+    func waitForTermination(of id: UUID) async -> Bool {
+        guard let task = terminating[id] else { return true }
+        return await task.value
+    }
+
+    var hasPendingTerminations: Bool { !terminating.isEmpty }
+
+    func waitForTerminations() async {
+        for task in Array(terminating.values) { _ = await task.value }
     }
 
     func hasLog(for projectId: UUID) -> Bool {
         fileManager.fileExists(atPath: logURL(for: projectId).path)
     }
 
-    func maintainLogSize(for projectId: UUID) {
-        let url = logURL(for: projectId)
-        let attributes = try? fileManager.attributesOfItem(atPath: url.path)
-        let size = (attributes?[.size] as? NSNumber)?.uint64Value ?? 0
-        guard size > Self.maximumLogBytes else { return }
-
-        let previousURL = url.deletingPathExtension().appendingPathExtension("previous.log")
-        try? fileManager.removeItem(at: previousURL)
-        do {
-            try fileManager.copyItem(at: url, to: previousURL)
-        } catch {
-            return
-        }
-
-        guard let handle = try? FileHandle(forWritingTo: url) else { return }
-        defer { try? handle.close() }
-        try? handle.truncate(atOffset: 0)
+    func logLocation(for projectId: UUID) -> URL {
+        records[projectId].map { URL(fileURLWithPath: $0.logPath) } ?? logURL(for: projectId)
     }
 
     func logLines(for projectId: UUID, limit: Int = 200) -> [String] {
-        let url = records[projectId].map { URL(fileURLWithPath: $0.logPath) }
-            ?? logURL(for: projectId)
-        guard
-            let handle = try? FileHandle(forReadingFrom: url),
-            let size = try? handle.seekToEnd()
-        else {
-            return []
-        }
+        Self.logLines(at: logLocation(for: projectId), limit: limit)
+    }
+
+    nonisolated static func logLines(at url: URL, limit: Int = 200) -> [String] {
+        let fd = open(url.path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { return [] }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         defer { try? handle.close() }
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, let size = try? handle.seekToEnd() else { return [] }
 
         let offset = size > Self.logTailBytes ? size - Self.logTailBytes : 0
         try? handle.seek(toOffset: offset)
-        guard let data = try? handle.readToEnd() else { return [] }
+        guard let data = try? handle.read(upToCount: Int(Self.logTailBytes)) else { return [] }
 
         var lines = String(decoding: data, as: UTF8.self)
             .split(whereSeparator: \Character.isNewline)
@@ -303,11 +336,13 @@ final class ProjectProcessManager {
 
     func clearLog(for projectId: UUID) {
         let url = logURL(for: projectId)
-        guard fileManager.fileExists(atPath: url.path), let handle = try? FileHandle(forWritingTo: url) else {
-            return
+        let fd = open(url.path, O_WRONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        var info = stat()
+        if fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_nlink == 1 {
+            _ = ftruncate(fd, 0)
         }
-        defer { try? handle.close() }
-        try? handle.truncate(atOffset: 0)
     }
 
     func removeLog(for projectId: UUID) {
@@ -337,7 +372,14 @@ final class ProjectProcessManager {
     private func validatedPID(for record: ManagedProjectProcessRecord) -> Int32? {
         guard ProcessTree.isAlive(record.rootPID) else { return nil }
         guard let actualStart = ProcessTree.startDate(of: record.rootPID) else { return nil }
-        return abs(actualStart.timeIntervalSince(record.startedAt)) <= 5 ? record.rootPID : nil
+        return matchesStart(actualStart, record: record) ? record.rootPID : nil
+    }
+
+    private func matchesStart(_ actualStart: Date, record: ManagedProjectProcessRecord) -> Bool {
+        let actual = actualStart.timeIntervalSince1970
+        if let preciseStart = record.preciseStart { return actual == preciseStart }
+        // Older records stored ISO 8601 timestamps with second precision.
+        return floor(actual) == floor(record.startedAt.timeIntervalSince1970)
     }
 
     private func prepareLogFile(for projectId: UUID) throws -> URL {
@@ -348,8 +390,9 @@ final class ProjectProcessManager {
 
         if size > Self.maximumLogBytes {
             let previousURL = url.deletingPathExtension().appendingPathExtension("previous.log")
-            try? fileManager.removeItem(at: previousURL)
-            try fileManager.moveItem(at: url, to: previousURL)
+            guard rename(url.path, previousURL.path) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
         }
 
         if !fileManager.fileExists(atPath: url.path) {
@@ -361,10 +404,15 @@ final class ProjectProcessManager {
     }
 
     private func openLogHandle(at url: URL) throws -> FileHandle {
-        let descriptor = Darwin.open(url.path, O_WRONLY | O_CREAT | O_APPEND, S_IRUSR | S_IWUSR)
+        let descriptor = Darwin.open(url.path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, S_IRUSR | S_IWUSR)
         guard descriptor >= 0 else {
             let message = String(cString: strerror(errno))
             throw ProjectProcessError.launchFailed("Could not open log file: \(message)")
+        }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_nlink == 1 else {
+            close(descriptor)
+            throw ProjectProcessError.launchFailed("The log must be a regular file.")
         }
         return FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
     }
@@ -380,7 +428,7 @@ final class ProjectProcessManager {
             .joined()
     }
 
-    private func logURL(for projectId: UUID) -> URL {
+    func logURL(for projectId: UUID) -> URL {
         storageDirectoryURL.appendingPathComponent("\(projectId.uuidString).log")
     }
 
