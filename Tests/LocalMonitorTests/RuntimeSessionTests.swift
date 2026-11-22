@@ -144,6 +144,7 @@ final class RuntimeSessionTests: XCTestCase {
             first.markRunning(project, owner: port(pid: 100, startedAt: startedAt))
 
             let reopened = LocalMonitorModel(store: store, healthChecksEnabled: false, userDefaults: defaults, bootSession: boot)
+            XCTAssertEqual(reopened.runtimeState(for: project).startedAt, startedAt)
             reopened.markRunning(project, owner: port(pid: 100, startedAt: startedAt))
             XCTAssertEqual(reopened.runtimeState(for: project).status, .running)
             XCTAssertEqual(reopened.runtimeState(for: project).startedAt, startedAt)
