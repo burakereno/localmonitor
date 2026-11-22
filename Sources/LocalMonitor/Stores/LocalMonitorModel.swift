@@ -17,6 +17,7 @@ enum CleanRestartError: LocalizedError {
 }
 
 private struct RuntimeSessionSnapshot: Codable {
+    let bootID: UUID?
     let startedAt: Date
     let processStartedAt: Date?
     let lastSeenRunningAt: Date?
@@ -88,6 +89,7 @@ final class LocalMonitorModel: ObservableObject {
     let notificationService: NotificationService
     let processManager: ProjectProcessManager
     let defaults: UserDefaults
+    private let bootSession: SystemBootSession
     private var refreshCycle: Task<Void, Never>?
     private struct RefreshRequest {
         let includesExternalPorts: Bool
@@ -122,7 +124,8 @@ final class LocalMonitorModel: ObservableObject {
         healthChecksEnabled: Bool? = nil,
         notificationService: NotificationService? = nil,
         processManager: ProjectProcessManager? = nil,
-        userDefaults: UserDefaults = .standard
+        userDefaults: UserDefaults = .standard,
+        bootSession: SystemBootSession = .current
     ) {
         self.store = store
         self.iconCache = store.storageDirectoryURL.map {
@@ -139,9 +142,10 @@ final class LocalMonitorModel: ObservableObject {
             userDefaults: userDefaults, storageDirectoryURL: store.storageDirectoryURL?.appendingPathComponent("Managed Processes")
         )
         self.defaults = userDefaults
+        self.bootSession = bootSession
         let loadedLibrary = store.load()
         let library = Self.migrateLegacyCommandTemplates(in: loadedLibrary)
-        let savedRuntimeSessions = Self.loadRuntimeSessions(from: userDefaults)
+        let savedRuntimeSessions = Self.loadRuntimeSessions(from: userDefaults, boot: bootSession)
         self.projects = library.projects
         self.groups = library.groups
         self.pinnedPortNames = Self.loadPinnedPorts(from: userDefaults)
@@ -1701,6 +1705,7 @@ final class LocalMonitorModel: ObservableObject {
         var snapshots = runtimeStates.reduce(into: [String: RuntimeSessionSnapshot]()) { result, item in
             guard let startedAt = item.value.startedAt else { return }
             result[item.key.uuidString] = RuntimeSessionSnapshot(
+                bootID: bootSession.id,
                 startedAt: startedAt,
                 processStartedAt: item.value.processStartedAt,
                 lastSeenRunningAt: item.value.lastSeenRunningAt,
@@ -1711,7 +1716,7 @@ final class LocalMonitorModel: ObservableObject {
 
         if store.loadIssue != nil {
             let knownIDs = Set(projects.map(\.id))
-            for (id, snapshot) in Self.loadRuntimeSessions(from: defaults) where !knownIDs.contains(id) {
+            for (id, snapshot) in Self.loadRuntimeSessions(from: defaults, boot: bootSession) where !knownIDs.contains(id) {
                 snapshots[id.uuidString] = snapshot
             }
         }
@@ -1727,7 +1732,7 @@ final class LocalMonitorModel: ObservableObject {
         defaults.set(data, forKey: Self.runtimeSessionsKey)
     }
 
-    private static func loadRuntimeSessions(from defaults: UserDefaults) -> [UUID: RuntimeSessionSnapshot] {
+    private static func loadRuntimeSessions(from defaults: UserDefaults, boot: SystemBootSession) -> [UUID: RuntimeSessionSnapshot] {
         guard let data = defaults.data(forKey: runtimeSessionsKey) else {
             return [:]
         }
@@ -1741,6 +1746,12 @@ final class LocalMonitorModel: ObservableObject {
 
         return snapshots.reduce(into: [UUID: RuntimeSessionSnapshot]()) { result, item in
             guard let id = UUID(uuidString: item.key) else { return }
+            if let savedID = item.value.bootID, let currentID = boot.id {
+                guard savedID == currentID else { return }
+            } else {
+                // Older releases saved the session start without a boot identifier.
+                guard let bootStart = boot.startedAt, item.value.startedAt >= bootStart else { return }
+            }
             result[id] = item.value
         }
     }
@@ -1885,24 +1896,22 @@ final class LocalMonitorModel: ObservableObject {
                 } else if projectLaunchRequests[project.id] != nil || dependencyLaunchTasks[project.id] != nil {
                     state.status = .starting
                     runtimeStates[project.id] = state
-                } else if state.isWithinSessionContinuityGrace(
-                    now: now,
-                    continuityGrace: sessionContinuityGraceInterval
-                ) {
-                    state.status = .noPort
-                    state.pid = nil
-                    state.observedPort = nil
-                    state.lastMessage = "Waiting for \(project.localAuthority) to reopen."
-                    runtimeStates[project.id] = state
                 } else if state.status != .stopped || state.startedAt != nil || state.lastSeenRunningAt != nil {
                     state.status = .stopped
                     state.ownership = .none
                     state.pid = nil
                     state.observedPort = nil
-                    state.clearSessionTiming()
+                    // A listener can reopen during a reload. Only its timing has a grace period.
+                    if !state.isWithinSessionContinuityGrace(now: now, continuityGrace: sessionContinuityGraceInterval) {
+                        state.clearSessionTiming()
+                    }
                     state.lastMessage = "Stopped."
-                    runtimeStates[project.id] = state
-                    healthStates[project.id] = .unknown
+                    if state != runtimeStates[project.id] {
+                        invalidateReadinessCheck(for: project.id)
+                        state.readiness = ProjectReadinessState()
+                        runtimeStates[project.id] = state
+                        healthStates[project.id] = .unknown
+                    }
                 }
             }
         }
